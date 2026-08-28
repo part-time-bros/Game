@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+<meta name="description" content="NOVA LANCE — a 3D hover-combat arena roguelite. Hold the last stabilizer against fifteen waves of the Void." />
+<meta name="theme-color" content="#05060f" />
+<title>NOVA LANCE</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" media="print" onload="this.media='all';this.onload=null" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;600;700&family=Rajdhani:wght@500;600;700&display=swap">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;600;700&family=Rajdhani:wght@500;600;700&display=swap"></noscript>
+<link rel="stylesheet" href="src/ui/style.css" />
+</head>
+<body>
+<div id="app">
+  <canvas id="scene"></canvas>
+  <div id="vignette"></div>
+  <div id="damage-flash"></div>
+  <div id="overdrive-tint"></div>
+  <div id="scanlines"></div>
+
+  <!-- ============ HUD ============ -->
+  <div id="hud" class="layer" hidden>
+    <div id="hud-top">
+      <div class="hud-wave">
+        <div class="hud-wave-label" id="wave-label">WAVE 1</div>
+        <div class="hud-wave-sub" id="wave-sub">HOSTILES 0</div>
+        <div class="hud-wave-bar"><i id="wave-bar-fill"></i></div>
+      </div>
+      <div class="hud-score">
+        <div class="hud-score-value" id="score-value">0</div>
+        <div class="hud-combo" id="combo-value">x1.0</div>
+        <div class="hud-combo-bar"><i id="combo-bar-fill"></i></div>
+      </div>
+    </div>
+
+    <div id="boss-bar" hidden>
+      <div class="boss-name" id="boss-name">WARDEN</div>
+      <div class="boss-track">
+        <i class="boss-fill" id="boss-fill"></i>
+        <i class="boss-lag" id="boss-lag"></i>
+      </div>
+      <div class="boss-phase" id="boss-phase"></div>
+    </div>
+
+    <div id="hud-bottom">
+      <div class="vitals">
+        <div class="vital-row">
+          <span class="vital-tag">HULL</span>
+          <div class="bar hull"><i id="hull-fill"></i><i class="bar-lag" id="hull-lag"></i></div>
+          <span class="vital-num" id="hull-num">100</span>
+        </div>
+        <div class="vital-row">
+          <span class="vital-tag">SHLD</span>
+          <div class="bar shield"><i id="shield-fill"></i></div>
+          <span class="vital-num" id="shield-num">50</span>
+        </div>
+      </div>
+      <div class="power">
+        <div class="dash-charges" id="dash-charges"></div>
+        <div class="bar energy"><i id="energy-fill"></i><span class="bar-label">ENERGY</span></div>
+        <div class="bar overdrive" id="overdrive-bar"><i id="overdrive-fill"></i><span class="bar-label" id="overdrive-label">OVERDRIVE</span></div>
+      </div>
+    </div>
+
+    <div id="module-strip"></div>
+    <div id="crosshair"><svg viewBox="0 0 64 64" aria-hidden="true"><circle class="ch-ring" cx="32" cy="32" r="19"/><circle class="ch-dot" cx="32" cy="32" r="2.2"/><path class="ch-tick" d="M32 6v9M32 49v9M6 32h9M49 32h9"/></svg></div>
+    <div id="indicators"></div>
+    <div id="floaters"></div>
+    <div id="banner"></div>
+    <div id="toast-stack"></div>
+    <div id="perf" hidden></div>
+  </div>
+
+  <!-- ============ SCREENS ============ -->
+  <div id="boot" class="layer screen" data-active="1">
+    <div class="boot-inner">
+      <div class="boot-logo">NOVA<span>LANCE</span></div>
+      <div class="boot-bar"><i id="boot-fill"></i></div>
+      <div class="boot-status" id="boot-status">forging assets…</div>
+    </div>
+  </div>
+
+  <div id="menu" class="layer screen">
+    <div class="menu-grid">
+      <div class="menu-brand">
+        <div class="title">NOVA<span>LANCE</span></div>
+        <div class="tagline">Hold the last stabilizer. The Void counts to fifteen.</div>
+      </div>
+      <nav class="menu-nav">
+        <button class="btn primary" data-action="to-hangar"><span>LAUNCH RUN</span><em id="menu-launch-sub">select chassis</em></button>
+        <button class="btn" data-action="to-manual"><span>FLIGHT MANUAL</span><em>controls &amp; codex</em></button>
+        <button class="btn" data-action="to-options"><span>OPTIONS</span><em>audio, quality</em></button>
+        <button class="btn" data-action="to-records"><span>SERVICE RECORD</span><em id="menu-records-sub">no runs logged</em></button>
+      </nav>
+      <div class="menu-foot">
+        <span id="menu-best">BEST — none</span>
+        <span class="dot">•</span>
+        <span>v1.0</span>
+        <span class="dot">•</span>
+        <span id="menu-tip">Tip: dash through fire — you are invulnerable mid-dash.</span>
+      </div>
+    </div>
+  </div>
+
+  <div id="hangar" class="layer screen">
+    <div class="panel wide">
+      <h2>HANGAR</h2>
+      <div class="ship-cards" id="ship-cards"></div>
+      <div class="hangar-row">
+        <div class="field">
+          <label>THREAT LEVEL</label>
+          <div class="segmented" id="difficulty-seg"></div>
+          <p class="hint" id="difficulty-hint"></p>
+        </div>
+        <div class="field">
+          <label>MISSION</label>
+          <div class="segmented" id="mode-seg"></div>
+          <p class="hint" id="mode-hint"></p>
+        </div>
+      </div>
+      <div class="panel-actions">
+        <button class="btn ghost" data-action="to-menu">BACK</button>
+        <button class="btn primary" data-action="start-run"><span>DEPLOY</span></button>
+      </div>
+    </div>
+  </div>
+
+  <div id="options" class="layer screen">
+    <div class="panel">
+      <h2>OPTIONS</h2>
+      <div class="opt-list" id="opt-list"></div>
+      <div class="panel-actions">
+        <button class="btn ghost" data-action="back">BACK</button>
+        <button class="btn danger" data-action="wipe-save">WIPE RECORD</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="manual" class="layer screen">
+    <div class="panel wide">
+      <h2>FLIGHT MANUAL</h2>
+      <div class="manual-cols">
+        <div>
+          <h3>CONTROLS</h3>
+          <ul class="keylist" id="keylist"></ul>
+        </div>
+        <div>
+          <h3>THREAT CODEX</h3>
+          <div class="codex" id="codex"></div>
+        </div>
+      </div>
+      <div class="panel-actions"><button class="btn ghost" data-action="back">BACK</button></div>
+    </div>
+  </div>
+
+  <div id="records" class="layer screen">
+    <div class="panel">
+      <h2>SERVICE RECORD</h2>
+      <div class="stat-grid" id="stat-grid"></div>
+      <div class="unlocks" id="unlock-list"></div>
+      <div class="panel-actions"><button class="btn ghost" data-action="back">BACK</button></div>
+    </div>
+  </div>
+
+  <div id="refit" class="layer screen">
+    <div class="refit-inner">
+      <div class="refit-head">
+        <h2>REFIT BAY</h2>
+        <p id="refit-sub">Wave 1 cleared — install one module</p>
+      </div>
+      <div class="cards" id="upgrade-cards"></div>
+      <div class="refit-foot"><span id="refit-timer">Deploying in 12</span><button class="btn ghost small" data-action="reroll" id="reroll-btn">REROLL (1)</button></div>
+    </div>
+  </div>
+
+  <div id="pause" class="layer screen">
+    <div class="panel narrow">
+      <h2>PAUSED</h2>
+      <div class="pause-stats" id="pause-stats"></div>
+      <div class="panel-actions column">
+        <button class="btn primary" data-action="resume">RESUME</button>
+        <button class="btn" data-action="to-options-ingame">OPTIONS</button>
+        <button class="btn" data-action="restart">RESTART RUN</button>
+        <button class="btn ghost" data-action="abort">ABANDON RUN</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="results" class="layer screen">
+    <div class="panel">
+      <div class="result-rank" id="result-rank">B</div>
+      <h2 id="result-title">RUN ENDED</h2>
+      <p class="result-sub" id="result-sub"></p>
+      <div class="stat-grid" id="result-stats"></div>
+      <div class="result-modules" id="result-modules"></div>
+      <div class="panel-actions">
+        <button class="btn primary" data-action="retry">REDEPLOY</button>
+        <button class="btn ghost" data-action="to-menu">MAIN MENU</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="rotate-hint" class="layer">Rotate your device for the full cockpit view</div>
+  <div id="touch-controls" hidden>
+    <div class="stick" id="stick-move"><i></i></div>
+    <div class="stick" id="stick-aim"><i></i></div>
+    <div class="touch-btns">
+      <button class="tbtn" id="tbtn-dash">DASH</button>
+      <button class="tbtn" id="tbtn-pulse">PULSE</button>
+      <button class="tbtn" id="tbtn-over">OD</button>
+    </div>
+    <button class="tbtn pause" id="tbtn-pause">II</button>
+  </div>
+
+  <noscript><div class="layer screen" data-active="1"><div class="panel"><h2>JAVASCRIPT REQUIRED</h2><p>NOVA LANCE is a real-time WebGL game and needs JavaScript enabled.</p></div></div></noscript>
+</div>
+
+<script src="vendor/three.min.js"></script>
+<script type="module" src="src/main.js"></script>
+</body>
+</html>

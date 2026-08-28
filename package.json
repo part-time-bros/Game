@@ -1,0 +1,16 @@
+{
+  "name": "nova-lance",
+  "version": "1.0.0",
+  "description": "NOVA LANCE — a 3D hover-combat arena roguelite that runs in the browser. Zero runtime dependencies, all assets generated procedurally at load time.",
+  "type": "module",
+  "scripts": {
+    "start": "node tools/serve.js",
+    "dev": "node tools/serve.js",
+    "build": "node tools/build.js",
+    "test": "node tools/playtest.mjs",
+    "test:quick": "node tools/playtest.mjs --quick"
+  },
+  "keywords": ["game", "3d", "webgl", "three.js", "roguelite", "browser"],
+  "license": "MIT",
+  "private": true
+}
