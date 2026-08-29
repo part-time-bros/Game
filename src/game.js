@@ -771,7 +771,11 @@ export class Game {
     // ---- aim ----
     if (this.input.aim.mode === 'stick') {
       const d = this.input.aim;
-      this._aimWorld.set(p.position.x + d.dirX * 22, 1.05, p.position.z + d.dirZ * 22);
+      // Stick and touch aiming get a modest magnetic assist toward whatever is
+      // closest to the aim ray. Mouse aiming gets none — it does not need it,
+      // and stealing precision from a mouse player feels awful.
+      const a = this._aimAssist(p.position, d.dirX, d.dirZ);
+      this._aimWorld.set(p.position.x + a.x * 22, 1.05, p.position.z + a.z * 22);
       const s = this.camera.worldToScreen(this._aimWorld.x, this._aimWorld.y, this._aimWorld.z, this.width, this.height);
       this.aimScreen.x = s.x; this.aimScreen.y = s.y;
     } else if (this.input.aim.active) {
@@ -828,6 +832,46 @@ export class Game {
 
     this.ui.update(dtReal, p, this);
     this._syncComposite();
+  }
+
+  /** Blend an aim direction toward the best target inside a narrow cone. */
+  _aimAssist(origin, dx, dz) {
+    const out = this._assistOut || (this._assistOut = { x: 0, z: 0 });
+    out.x = dx; out.z = dz;
+    const MAX_ANGLE = 0.30;          // ~17 degrees
+    const MAX_RANGE = 34;
+    let best = null, bestScore = Infinity;
+    const list = this.enemies.active;
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i];
+      if (e.dying || e.type.hidden) continue;
+      const ex = e.x - origin.x, ez = e.z - origin.z;
+      const d = Math.hypot(ex, ez);
+      if (d < 2 || d > MAX_RANGE) continue;
+      const dot = clamp((ex * dx + ez * dz) / d, -1, 1);
+      const ang = Math.acos(dot);
+      if (ang > MAX_ANGLE) continue;
+      const score = ang * 3 + d * 0.01;
+      if (score < bestScore) { bestScore = score; best = { x: ex / d, z: ez / d, ang }; }
+    }
+    if (this.boss.active) {
+      const ex = this.boss.x - origin.x, ez = this.boss.z - origin.z;
+      const d = Math.hypot(ex, ez) || 1;
+      const ang = Math.acos(clamp((ex * dx + ez * dz) / d, -1, 1));
+      if (ang < MAX_ANGLE && d < 60) {
+        const score = ang * 3 + d * 0.01;
+        if (score < bestScore) best = { x: ex / d, z: ez / d, ang };
+      }
+    }
+    if (!best) return out;
+    // Strongest near the centre (settles the reticle) but still useful at the
+    // cone edge — a hard taper to zero there is where the assist is needed most.
+    const w = 0.42 * (1 - 0.55 * (best.ang / MAX_ANGLE));
+    out.x = dx + (best.x - dx) * w;
+    out.z = dz + (best.z - dz) * w;
+    const l = Math.hypot(out.x, out.z) || 1;
+    out.x /= l; out.z /= l;
+    return out;
   }
 
   _syncComposite() {

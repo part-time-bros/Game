@@ -12,7 +12,7 @@
  *   node tools/playtest.mjs --dist     test the built single-file bundle
  */
 import { spawn, execSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 
@@ -24,6 +24,7 @@ const args = process.argv.slice(2);
 const QUICK = args.includes('--quick');
 const SHOTS_ONLY = args.includes('--shots');
 const USE_DIST = args.includes('--dist');
+const USE_ARTIFACT = args.includes('--artifact');
 const HEADED = args.includes('--headed');
 
 // Playwright may only be installed globally in this environment.
@@ -95,9 +96,22 @@ async function main() {
   await context.route('**cdnjs.cloudflare.com/**/three.min.js', (r) =>
     r.fulfill({ path: join(ROOT, 'vendor', 'three.min.js'), contentType: 'text/javascript' }));
 
-  const url = USE_DIST
-    ? `http://localhost:${PORT}/dist/nova-lance.html?capture=1`
-    : `http://localhost:${PORT}/index.html?capture=1`;
+  // Reproduce the Artifact host's wrapper so the published page is exercised
+  // exactly as viewers will receive it.
+  if (USE_ARTIFACT) {
+    const content = readFileSync(join(ROOT, 'dist', 'nova-lance.artifact.html'), 'utf8');
+    writeFileSync(join(ROOT, 'dist', '.artifact-preview.html'), `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<style>:root{color-scheme:light dark}body{margin:0;font:14px system-ui;background:#faf9f7}img{max-width:100%}[hidden]{display:none!important}</style>
+</head><body>
+${content}
+</body></html>`);
+  }
+  const url = USE_ARTIFACT
+    ? `http://localhost:${PORT}/dist/.artifact-preview.html?capture=1`
+    : USE_DIST
+      ? `http://localhost:${PORT}/dist/nova-lance.html?capture=1`
+      : `http://localhost:${PORT}/index.html?capture=1`;
 
   try {
     section(`BOOT  (${url})`);
@@ -511,6 +525,118 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
   }
   check('survives viewport changes', consoleErrors.length === errAt() || true, `${consoleErrors.length} total errors`);
   await page.setViewportSize({ width: 1280, height: 720 });
+
+  // ---------------- touch ----------------
+  section('TOUCH CONTROLS');
+  {
+    const tctx = await page.context().browser().newContext({
+      viewport: { width: 844, height: 390 },
+      hasTouch: true, isMobile: true, deviceScaleFactor: 2,
+      userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+    });
+    await tctx.route('**/fonts.googleapis.com/**', (r) => r.abort());
+    await tctx.route('**/fonts.gstatic.com/**', (r) => r.abort());
+    await tctx.route('**cdnjs.cloudflare.com/**/three.min.js', (r) =>
+      r.fulfill({ path: join(ROOT, 'vendor', 'three.min.js'), contentType: 'text/javascript' }));
+    const tp = await tctx.newPage();
+    const terr = [];
+    tp.on('pageerror', (e) => terr.push(e.message));
+    await tp.goto(url, { waitUntil: 'domcontentloaded' });
+    await tp.waitForFunction(() => !!window.__NOVA, null, { timeout: 45000 });
+
+    const shown = await tp.evaluate(() => ({
+      touchUi: !document.getElementById('touch-controls').hidden,
+      bodyTouch: document.body.classList.contains('touch'),
+      hasTouch: window.__NOVA.game.input.hasTouch,
+    }));
+    check('touch overlay appears on a touch device', shown.touchUi && shown.bodyTouch && shown.hasTouch, JSON.stringify(shown));
+
+    await tp.evaluate(() => { window.__NOVA.start('striker', 'pilot', 'campaign', 3); window.__NOVA.step(1 / 60, 90); });
+
+    // drag the movement stick and confirm the ship actually accelerates
+    const stick = await tp.locator('#stick-move').boundingBox();
+    const before = await tp.evaluate(() => ({ x: window.__NOVA.game.player.position.x, z: window.__NOVA.game.player.position.z }));
+    await tp.mouse.move(stick.x + stick.width / 2, stick.y + stick.height / 2);
+    await tp.mouse.down();
+    await tp.mouse.move(stick.x + stick.width / 2 + 44, stick.y + stick.height / 2, { steps: 4 });
+    await tp.evaluate(() => window.__NOVA.step(1 / 60, 60));
+    const after = await tp.evaluate(() => ({ x: window.__NOVA.game.player.position.x, z: window.__NOVA.game.player.position.z }));
+    await tp.mouse.up();
+    check('move stick drives the ship', Math.abs(after.x - before.x) > 2, `dx=${(after.x - before.x).toFixed(1)} dz=${(after.z - before.z).toFixed(1)}`);
+
+    // aim stick should both aim and open fire
+    const astick = await tp.locator('#stick-aim').boundingBox();
+    await tp.mouse.move(astick.x + astick.width / 2, astick.y + astick.height / 2);
+    await tp.mouse.down();
+    await tp.mouse.move(astick.x + astick.width / 2 - 40, astick.y + astick.height / 2, { steps: 4 });
+    const fired = await tp.evaluate(() => {
+      const N = window.__NOVA;
+      const before = N.game.player.shotsFired;
+      N.step(1 / 60, 40);
+      return { shots: N.game.player.shotsFired - before, aimMode: N.game.input.aim.mode };
+    });
+    await tp.mouse.up();
+    check('aim stick fires the repeater', fired.shots > 0, `shots=${fired.shots} mode=${fired.aimMode}`);
+
+    // action buttons
+    const acted = await tp.evaluate(async () => {
+      const N = window.__NOVA;
+      const tap = (id) => {
+        const el = document.getElementById(id);
+        const b = el.getBoundingClientRect();
+        const opts = { pointerId: 1, bubbles: true, cancelable: true, clientX: b.x + b.width / 2, clientY: b.y + b.height / 2 };
+        el.dispatchEvent(new PointerEvent('pointerdown', opts));
+        el.dispatchEvent(new PointerEvent('pointerup', opts));
+      };
+      const p = N.game.player;
+      p.dashCharge = p.stats.dashCharges;
+      const dashBefore = p.dashCharge;
+      tap('tbtn-dash'); N.step(1 / 60, 3);
+      const dashed = p.dashCharge < dashBefore;
+      p.energy = p.stats.maxEnergy;
+      tap('tbtn-pulse'); N.step(1 / 60, 3);
+      const pulsed = p.energy < p.stats.maxEnergy;
+      tap('tbtn-pause'); N.step(1 / 60, 3);
+      const paused = N.state() === 'paused';
+      if (paused) N.resume();
+      return { dashed, pulsed, paused };
+    });
+    check('touch dash button fires a dash', acted.dashed);
+    check('touch pulse button spends energy', acted.pulsed);
+    check('touch pause button pauses', acted.paused);
+    check('no errors on a touch device', terr.length === 0, terr.slice(0, 2).join(' | '));
+
+    await tp.evaluate(() => { window.__NOVA.step(1 / 60, 120); window.__NOVA.render(); });
+    await tp.screenshot({ path: join(SHOTS, '16-touch.png') });
+    mkdirSync(SHOWCASE, { recursive: true });
+    await tp.screenshot({ path: join(SHOWCASE, '16-touch.jpg'), type: 'jpeg', quality: 82 });
+    await tctx.close();
+  }
+
+  // ---------------- aim assist ----------------
+  section('AIM ASSIST');
+  const assist = await page.evaluate(() => {
+    const N = window.__NOVA, g = N.game;
+    N.start('striker', 'pilot', 'campaign', 5);
+    N.step(1 / 60, 90);
+    g.waves.clear(); g.enemies.clear(); g.timers.length = 0;
+    g.player.position.set(0, 1.05, 0);
+    // target sits 12 degrees off the aim ray: inside the cone
+    const ang = 0.21;
+    const e = g.enemies.spawn('drone', Math.sin(ang) * 20, Math.cos(ang) * 20, {});
+    e.state = 'active'; e.spawnT = 1; e.speed = 0;
+    const pulled = g._aimAssist(g.player.position, 0, 1);
+    const pulledAng = Math.atan2(pulled.x, pulled.z);
+    // a target well outside the cone must be ignored
+    g.enemies.clear();
+    const far = g.enemies.spawn('drone', Math.sin(1.2) * 20, Math.cos(1.2) * 20, {});
+    far.state = 'active'; far.spawnT = 1;
+    const ignored = g._aimAssist(g.player.position, 0, 1);
+    return { pulledAng: +pulledAng.toFixed(3), target: +ang.toFixed(3), ignoredX: +ignored.x.toFixed(3) };
+  });
+  check('assist pulls toward a target inside the cone', assist.pulledAng > 0.02 && assist.pulledAng < assist.target,
+    `aim=${assist.pulledAng} target=${assist.target}`);
+  check('assist ignores targets outside the cone', Math.abs(assist.ignoredX) < 0.001, `x=${assist.ignoredX}`);
 
   // ---------------- resilience ----------------
   section('RESILIENCE');

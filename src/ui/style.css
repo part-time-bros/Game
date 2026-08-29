@@ -408,11 +408,34 @@ body.touch #crosshair{display:none;}
   background:rgba(70,230,255,.28);border:1px solid rgba(70,230,255,.55);box-shadow:0 0 18px rgba(70,230,255,.4);}
 #stick-move{left:clamp(16px,4vw,48px);}
 #stick-aim{right:clamp(16px,4vw,48px);}
-.touch-btns{position:absolute;right:clamp(16px,4vw,48px);bottom:calc(clamp(20px,7vh,60px) + 136px);display:flex;gap:8px;pointer-events:auto;}
 .tbtn{font-family:var(--f-display);font-size:11px;letter-spacing:.14em;color:var(--ink);background:rgba(70,230,255,.12);
   border:1px solid rgba(70,230,255,.4);padding:12px 14px;pointer-events:auto;cursor:pointer;}
 .tbtn:active{background:rgba(70,230,255,.4);}
 .tbtn.pause{position:absolute;top:max(14px,env(safe-area-inset-top));right:clamp(14px,2.4vw,32px);padding:8px 14px;}
+
+/* ---------- touch layout ----------
+   On a phone the thumbs own the bottom corners, so the vitals move up under
+   the top bar and the pause control moves to centre so it cannot collide with
+   the score readout. */
+body.touch #hud-bottom{
+  top:clamp(66px,12vh,92px);bottom:auto;align-items:flex-start;
+  gap:clamp(10px,3vw,28px);
+}
+body.touch .vitals{max-width:40vw;gap:5px;}
+body.touch .power{max-width:38vw;gap:5px;}
+body.touch .bar{height:11px;}
+body.touch .power .bar{flex:0 0 11px;}
+body.touch .dash-charges{height:7px;}
+body.touch .dash-pip{width:22px;height:7px;}
+body.touch .tbtn.pause{left:50%;right:auto;transform:translateX(-50%);}
+body.touch #boss-bar{top:clamp(112px,19vh,140px);}
+body.touch #toast-stack{top:clamp(112px,19vh,140px);}
+body.touch #banner{top:30%;}
+.touch-btns{
+  position:absolute;right:clamp(10px,2.6vw,30px);
+  bottom:calc(clamp(20px,7vh,60px) + 138px);
+  display:flex;gap:8px;pointer-events:auto;
+}
 
 #rotate-hint{display:none;z-index:40;place-items:center;text-align:center;padding:30px;background:rgba(3,4,12,.95);
   font-family:var(--f-display);letter-spacing:.2em;color:var(--ink-dim);text-transform:uppercase;}

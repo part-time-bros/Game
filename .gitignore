@@ -3,3 +3,4 @@ node_modules/
 *.log
 tools/.artifacts/
 docs/shots-visual/
+dist/.artifact-preview.html

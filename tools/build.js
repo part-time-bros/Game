@@ -73,6 +73,41 @@ function processModule(rel) {
   return { code: out.join('\n'), decls };
 }
 
+/**
+ * The Artifact host supplies its own <!doctype>/<head>/<body> skeleton, so the
+ * artifact build emits page *content* only: title, style, markup, scripts.
+ * The webfont is attached from script rather than a `media/onload` link so no
+ * inline event attribute is needed and nothing blocks first paint.
+ */
+function buildArtifact(chunks, css, html) {
+  const bodyStart = html.indexOf('<body>') + '<body>'.length;
+  const bodyEnd = html.indexOf('<script src="vendor/three.min.js">');
+  const markup = html.slice(bodyStart, bodyEnd).trim();
+
+  const fontLoader = `
+(function attachDisplayFont(){
+  try {
+    var l = document.createElement('link');
+    l.rel = 'stylesheet';
+    l.href = 'https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;600;700&family=Rajdhani:wght@500;600;700&display=swap';
+    document.head.appendChild(l);
+  } catch (e) { /* the CSS fallback stack covers this */ }
+})();`;
+
+  const out = [
+    '<title>NOVA LANCE</title>',
+    `<style>\n${css}\n</style>`,
+    markup,
+    `<script src="${THREE_CDN}"></script>`,
+    `<script>\n"use strict";\n${fontLoader}\n(function(){\n${chunks.join('\n')}\n})();\n</script>`,
+  ].join('\n');
+
+  const outPath = join(ROOT, 'dist', 'nova-lance.artifact.html');
+  writeFileSync(outPath, out);
+  console.log(`✓ dist/nova-lance.artifact.html  (${(Buffer.byteLength(out) / 1024).toFixed(1)} KB, host-wrapped page content)`);
+  return outPath;
+}
+
 function build() {
   const seen = new Map();
   const chunks = [];
@@ -106,6 +141,8 @@ function build() {
 
   const kb = (Buffer.byteLength(html) / 1024).toFixed(1);
   console.log(`✓ dist/nova-lance.html  (${kb} KB, ${ORDER.length} modules, ${seen.size} top-level names)`);
+
+  buildArtifact(chunks, css, readFileSync(join(ROOT, 'index.html'), 'utf8'));
   return outPath;
 }
 

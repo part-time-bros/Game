@@ -41,6 +41,9 @@ export class Input {
     this._touchAimActive = false;
     this._sticks = { move: null, aim: null };
     this._touchButtons = { dash: false, pulse: false, over: false, pause: false };
+    // Taps shorter than a frame must not be lost: pointerdown latches the
+    // request and sample() consumes it, rather than reading a live held flag.
+    this._edgeLatch = { dash: false, pulse: false, over: false, pause: false };
     this._listeners = [];
     this._install();
   }
@@ -137,13 +140,13 @@ export class Input {
     mkStick(els.move, 'move');
     mkStick(els.aim, 'aim');
 
-    const mkBtn = (el, key, edgeKey) => {
+    const mkBtn = (el, key) => {
       if (!el) return;
       el.addEventListener('pointerdown', (e) => {
         e.preventDefault();
         this.scheme = 'touch';
         this._touchButtons[key] = true;
-        if (edgeKey) this[edgeKey] = true;
+        this._edgeLatch[key] = true;
         this.anyEdge = true;
       });
       const up = () => { this._touchButtons[key] = false; };
@@ -151,10 +154,10 @@ export class Input {
       el.addEventListener('pointercancel', up);
       el.addEventListener('pointerleave', up);
     };
-    mkBtn(els.dash, 'dash', 'dashEdge');
-    mkBtn(els.pulse, 'pulse', 'pulseEdge');
-    mkBtn(els.over, 'over', 'overdriveEdge');
-    mkBtn(els.pause, 'pause', 'pauseEdge');
+    mkBtn(els.dash, 'dash');
+    mkBtn(els.pulse, 'pulse');
+    mkBtn(els.over, 'over');
+    mkBtn(els.pause, 'pause');
   }
 
   keyDown(code) { return this.keys.has(code); }
@@ -168,6 +171,7 @@ export class Input {
     this._sticks.move = null;
     this._sticks.aim = null;
     for (const k in this._touchButtons) this._touchButtons[k] = false;
+    for (const k in this._edgeLatch) this._edgeLatch[k] = false;
   }
 
   /** Called by the game each frame *before* systems read intent. */
@@ -252,8 +256,11 @@ export class Input {
       }
       if (!locked) {
         if (this._touchButtons.pulse) pulseHeld = true;
-        if (this._touchButtons.dash) dash = true;      // repeat-friendly; gated by charges
+        if (this._touchButtons.dash || this._edgeLatch.dash) dash = true;
+        if (this._edgeLatch.pulse) pulse = true;
+        if (this._edgeLatch.over) over = true;
       }
+      if (this._edgeLatch.pause) pause = true;
     }
 
     const len = lengthXZ(mx, mz);
@@ -297,6 +304,10 @@ export class Input {
     this._touchButtons.dash = false;
     this._touchButtons.over = false;
     this._touchButtons.pause = false;
+    this._edgeLatch.dash = false;
+    this._edgeLatch.pulse = false;
+    this._edgeLatch.over = false;
+    this._edgeLatch.pause = false;
   }
 
   /** Swallow inputs briefly — used when screens open/close so clicks don't leak into play. */

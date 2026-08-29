@@ -1,12 +1,12 @@
 {
-  "when": "2026-08-29T01:25:24.332Z",
-  "passed": 61,
+  "when": "2026-08-29T01:40:33.855Z",
+  "passed": 70,
   "failed": 0,
   "results": [
     {
       "name": "game boots",
       "ok": true,
-      "detail": "2242ms"
+      "detail": "1861ms"
     },
     {
       "name": "no console errors on boot",
@@ -56,7 +56,7 @@
     {
       "name": "score accrues",
       "ok": true,
-      "detail": "score=192"
+      "detail": "score=214"
     },
     {
       "name": "wave 8 mixed composition runs clean",
@@ -66,7 +66,7 @@
     {
       "name": "enemy count stays bounded",
       "ok": true,
-      "detail": "max=12"
+      "detail": "max=13"
     },
     {
       "name": "projectiles stay bounded",
@@ -176,7 +176,7 @@
     {
       "name": "campaign reaches a conclusion",
       "ok": true,
-      "detail": "results after 438s"
+      "detail": "results after 508s"
     },
     {
       "name": "all 15 waves are reachable",
@@ -211,7 +211,7 @@
     {
       "name": "geometry count stable across 12 runs",
       "ok": true,
-      "detail": "42 → 42"
+      "detail": "39 → 39"
     },
     {
       "name": "texture count stable across 12 runs",
@@ -236,12 +236,57 @@
     {
       "name": "state sane after abuse",
       "ok": true,
-      "detail": "dying"
+      "detail": "playing"
     },
     {
       "name": "survives viewport changes",
       "ok": true,
       "detail": "0 total errors"
+    },
+    {
+      "name": "touch overlay appears on a touch device",
+      "ok": true,
+      "detail": "{\"touchUi\":true,\"bodyTouch\":true,\"hasTouch\":true}"
+    },
+    {
+      "name": "move stick drives the ship",
+      "ok": true,
+      "detail": "dx=26.7 dz=0.0"
+    },
+    {
+      "name": "aim stick fires the repeater",
+      "ok": true,
+      "detail": "shots=5 mode=stick"
+    },
+    {
+      "name": "touch dash button fires a dash",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "touch pulse button spends energy",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "touch pause button pauses",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "no errors on a touch device",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "assist pulls toward a target inside the cone",
+      "ok": true,
+      "detail": "aim=0.054 target=0.21"
+    },
+    {
+      "name": "assist ignores targets outside the cone",
+      "ok": true,
+      "detail": "x=0"
     },
     {
       "name": "boots with a corrupt save payload",
@@ -271,7 +316,7 @@
     {
       "name": "respects pool caps",
       "ok": true,
-      "detail": "enemies=36 projectiles=24"
+      "detail": "enemies=39 projectiles=22"
     },
     {
       "name": "survives hostile delta times",
@@ -296,7 +341,7 @@
     {
       "name": "draw calls under 90",
       "ok": true,
-      "detail": "56"
+      "detail": "50"
     },
     {
       "name": "no console errors across the whole suite",
