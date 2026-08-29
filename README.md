@@ -82,6 +82,18 @@ mechanics — the Warden (orbital plates, spiral fire, arena slam), the Harrower
 (sweeping beams, charge runs, minefields) and the Void Maw (jaw shockwaves,
 void zones, a vacuum phase that exposes its eye as a weak point).
 
+**Real skeletal animation.** Every enemy and chassis is a rigged model with
+authored clips, not a spinning mesh: Skitters scuttle on four articulated legs
+and crouch before a lunge, Sentinels stride on a tripod gait and brace before
+firing, Lancers pump their legs into a charge, Seeder barrels recoil in
+sequence, ship wings fold back on a dash. Hits produce a flinch away from the
+impact; death drives a limp collapse through the rig.
+
+**Cinematics.** Deployment opens on a wide sweep while the hull materialises;
+each boss arrives on a letterboxed low-angle push-in anchored to its live
+position; victory rises off the deck and defeat pushes in on the wreck. Every
+intro is skippable on any input.
+
 **Twenty-six modules** across three rarities: multishot, ricochet, pierce,
 chain lightning, seekers, lifesteal, volatile cores, guardian drones, time
 dilation on dash, siphon pulses, and more. Everything stacks and recomputes
@@ -98,6 +110,8 @@ Phantom (three dashes, glass) — unlocked by reaching waves 5 and 10.
 | Asset | How it is made |
 | --- | --- |
 | Meshes | `MeshBuilder` composes primitives into one merged non-indexed geometry per model, carrying per-vertex colour and emissive attributes. One draw call per entity. |
+| Rigs | `RigBuilder` does the same but assigns each part to a bone and emits an `aBone` attribute, so an articulated model is still one draw call. |
+| Animation | Clips are authored in code as position/rotation/scale tracks, compiled against a skeleton, then crossfaded by a small animator with procedural overlays on top. |
 | Deck | A two-tier hex lattice evaluated in the fragment shader, with travelling scan pulses and eight live impact ripples. |
 | Sky | An equirectangular nebula painted once into a canvas: fbm cloud layers sampled on a circle (so it tiles), three star populations, cross flares. |
 | Particles | Canvas-painted glow/smoke/shard sprites over a data-oriented `Points` system — one draw call per blend mode. |
@@ -124,14 +138,16 @@ src/
   render/
     renderer.js       WebGL setup + hand-written bloom & composite passes
     materials.js      the shader family (surface, floor, energy, particles…)
-    models.js         every mesh in the game
+    rig.js            rigid-bind skinning, clips, crossfading animator
+    models.js         static meshes (props, projectiles, pickups)
+    rig-models.js     the animated cast: ships, six archetypes, three bosses
     textures.js       every texture in the game
     world.js          arena assembly
     camera.js         chase rig with two-target boss framing
     particles.js      GPU particle systems + named effects
     vfx.js            rings, beams, telegraphs, debris, blob shadows, screen FX
   entities/           player, enemies + AI, projectiles, pickups, bosses
-  systems/            ships, upgrade catalogue, wave director
+  systems/            ships, upgrade catalogue, wave director, cinematics
   ui/                 screens, HUD, feedback, stylesheet
 tools/
   serve.js            zero-dep dev server
@@ -141,6 +157,7 @@ tools/
   balance.mjs         scripted bot campaigns for tuning
   audiomix.mjs        offline render of every effect: peak / RMS / duration
   visual.mjs          staged scene capture for art review
+  rigview.mjs         isolated contact sheets of any animation clip
   check.mjs           syntax check across all modules
 ```
 
@@ -149,11 +166,18 @@ post-processing addons: the scene renders into an HDR target, a bright pass
 feeds two blur levels, and one composite pass does bloom, ACES tone mapping,
 sRGB encode, vignette, chromatic aberration, grain and the overdrive grade.
 
+Animation is bespoke for a related reason: three's skinning path needs GLSL3
+`texelFetch`, which would drag the whole shader family to ES 3.00. These models
+are hard-surface robots where every vertex belongs to exactly one bone, so
+`rig.js` implements a leaner rigid bind — one `aBone` attribute and a small
+mat4 uniform array — preserving one draw call per entity in GLSL1.
+
 ## Performance
 
 Everything that spawns during play is pooled — projectiles, enemies, particles,
 rings, decals, beams, debris, pickups and even the floating damage numbers.
-A frame at wave 15 with a boss on screen costs **~56 draw calls**, and the
+A frame at wave 15 with a boss on screen costs **~61 draw calls** — rigging the
+entire cast added none, because a skeleton does not split a mesh — and the
 simulation runs in well under a millisecond of CPU. Quality auto-tunes down a
 tier if the 90th-percentile frame time stays over budget.
 
@@ -190,6 +214,11 @@ wave-by-wave clear times, which is how the pacing above was tuned.
 
 - Bloom is a two-level Gaussian rather than a proper mip pyramid; on very wide
   displays the largest halos are slightly blocky at the Low quality tier.
+- Animation blends interpolate Euler angles rather than quaternions. That is
+  fine for the ranges these clips use, but a clip authored with a rotation past
+  180 degrees on one axis would take the short way round and look wrong.
+- Death collapses are a procedural overlay rather than authored death clips, so
+  every archetype crumples in a broadly similar way.
 - The soundtrack is generative, not composed — it never resolves to a chorus.
 - The audio mix is verified numerically (levels, clipping, duration) but has
   never been listened to on speakers; timbre judgements are inferred from the
