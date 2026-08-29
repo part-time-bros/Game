@@ -1061,15 +1061,21 @@ class AudioEngine {
     this._bpm = 124;
     this._mode = 'menu';       // menu | combat | boss | victory | defeat
     this._duckUntil = 0;
+    this.offline = false;
   }
 
-  /** Must be triggered by a user gesture; safe to call repeatedly. */
-  init() {
+  /**
+   * Must be triggered by a user gesture; safe to call repeatedly.
+   * `contextOverride` lets the test suite render the whole graph into an
+   * OfflineAudioContext and measure that every effect is actually audible.
+   */
+  init(contextOverride) {
     if (this.ready || this.failed) return this.ready;
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) { this.failed = true; return false; }
-      const ctx = new AC({ latencyHint: 'interactive' });
+      if (!AC && !contextOverride) { this.failed = true; return false; }
+      const ctx = contextOverride || new AC({ latencyHint: 'interactive' });
+      this.offline = !!contextOverride;
       this.ctx = ctx;
 
       this.limiter = ctx.createDynamicsCompressor();
@@ -1257,15 +1263,15 @@ class AudioEngine {
   //  SFX library
   // ======================================================================
   play(name, opts = {}) {
-    if (!this.ready || this.ctx.state !== 'running') return;
+    if (!this.ready || (!this.offline && this.ctx.state !== 'running')) return;
     const v = opts.gain !== undefined ? opts.gain : 1;
     const p = opts.pitch !== undefined ? opts.pitch : 1;
     switch (name) {
       case 'shoot': {
         if (!this._gate('shoot', 0.028)) return;
         const f = 900 * p * (0.94 + Math.random() * 0.12);
-        this._tone({ type: 'sawtooth', f0: f, f1: f * 0.32, dur: 0.11, gain: 0.16 * v, filter: 'bandpass', cutoff0: f * 2.1, cutoff1: f * 0.8, q: 2.4 });
-        this._noiseBurst({ f0: 3200, f1: 900, dur: 0.06, gain: 0.09 * v, q: 0.9 });
+        this._tone({ type: 'sawtooth', f0: f, f1: f * 0.32, dur: 0.12, gain: 0.30 * v, filter: 'bandpass', cutoff0: f * 1.5, cutoff1: f * 0.7, q: 1.5 });
+        this._noiseBurst({ f0: 2600, f1: 800, dur: 0.06, gain: 0.14 * v, q: 0.8 });
         break;
       }
       case 'shootHeavy': {
@@ -1276,20 +1282,20 @@ class AudioEngine {
       }
       case 'enemyShoot': {
         if (!this._gate('enemyShoot', 0.05)) return;
-        this._tone({ type: 'square', f0: 320 * p, f1: 140 * p, dur: 0.13, gain: 0.075 * v, filter: 'bandpass', cutoff0: 900, cutoff1: 380, q: 3 });
+        this._tone({ type: 'square', f0: 320 * p, f1: 140 * p, dur: 0.15, gain: 0.19 * v, filter: 'bandpass', cutoff0: 520, cutoff1: 220, q: 1.2 });
         break;
       }
       case 'hit': {
         if (!this._gate('hit', 0.022)) return;
-        this._noiseBurst({ f0: 2600 * p, f1: 700, dur: 0.055, gain: 0.11 * v, q: 1.6 });
-        this._tone({ type: 'triangle', f0: 560 * p, f1: 200, dur: 0.05, gain: 0.07 * v });
+        this._noiseBurst({ f0: 2200 * p, f1: 620, dur: 0.06, gain: 0.20 * v, q: 1.1 });
+        this._tone({ type: 'triangle', f0: 560 * p, f1: 200, dur: 0.06, gain: 0.13 * v });
         break;
       }
       case 'crit': {
         if (!this._gate('crit', 0.03)) return;
-        this._noiseBurst({ f0: 5200, f1: 1400, dur: 0.09, gain: 0.13 * v, q: 2 });
-        this._tone({ type: 'triangle', f0: 1500, f1: 620, dur: 0.13, gain: 0.1 * v });
-        this._tone({ type: 'triangle', f0: 2260, f1: 940, dur: 0.1, gain: 0.06 * v, detune: 9 });
+        this._noiseBurst({ f0: 4200, f1: 1200, dur: 0.10, gain: 0.22 * v, q: 1.4 });
+        this._tone({ type: 'triangle', f0: 1500, f1: 620, dur: 0.14, gain: 0.17 * v });
+        this._tone({ type: 'triangle', f0: 2260, f1: 940, dur: 0.11, gain: 0.10 * v, detune: 9 });
         break;
       }
       case 'kill': {
@@ -1307,8 +1313,8 @@ class AudioEngine {
         break;
       }
       case 'dash': {
-        this._noiseBurst({ f0: 400, f1: 4200, dur: 0.17, gain: 0.16 * v, q: 1.4 });
-        this._tone({ type: 'sine', f0: 420, f1: 90, dur: 0.24, gain: 0.13 * v });
+        this._noiseBurst({ f0: 400, f1: 3600, dur: 0.18, gain: 0.30 * v, q: 1.0 });
+        this._tone({ type: 'sine', f0: 420, f1: 90, dur: 0.26, gain: 0.22 * v });
         break;
       }
       case 'pulse': {
@@ -1354,7 +1360,7 @@ class AudioEngine {
         break;
       }
       case 'shieldUp':
-        this._tone({ type: 'triangle', f0: 320, f1: 1400, dur: 0.35, gain: 0.09 * v, filter: 'bandpass', cutoff0: 700, cutoff1: 2600, q: 3 });
+        this._tone({ type: 'triangle', f0: 320, f1: 1400, dur: 0.35, gain: 0.2 * v, filter: 'bandpass', cutoff0: 420, cutoff1: 1800, q: 1.2 });
         break;
       case 'pickup': {
         if (!this._gate('pickup', 0.035)) return;
@@ -1378,14 +1384,14 @@ class AudioEngine {
       }
       case 'uiHover':
         if (!this._gate('uiHover', 0.04)) return;
-        this._tone({ type: 'square', f0: 1500, f1: 1800, dur: 0.035, gain: 0.03 * v, filter: 'bandpass', cutoff0: 2000, q: 4 });
+        this._tone({ type: 'square', f0: 1500, f1: 1800, dur: 0.045, gain: 0.075 * v, filter: 'bandpass', cutoff0: 1650, q: 1.4 });
         break;
       case 'uiClick':
-        this._tone({ type: 'square', f0: 700, f1: 1400, dur: 0.06, gain: 0.06 * v, filter: 'bandpass', cutoff0: 1800, q: 3 });
-        this._noiseBurst({ f0: 3000, f1: 6000, dur: 0.05, gain: 0.045 * v });
+        this._tone({ type: 'square', f0: 700, f1: 1400, dur: 0.07, gain: 0.13 * v, filter: 'bandpass', cutoff0: 1000, q: 1.3 });
+        this._noiseBurst({ f0: 3000, f1: 6000, dur: 0.05, gain: 0.06 * v });
         break;
       case 'uiBack':
-        this._tone({ type: 'square', f0: 900, f1: 420, dur: 0.08, gain: 0.05 * v, filter: 'bandpass', cutoff0: 1400, q: 3 });
+        this._tone({ type: 'square', f0: 900, f1: 420, dur: 0.09, gain: 0.12 * v, filter: 'bandpass', cutoff0: 640, q: 1.3 });
         break;
       case 'uiDeny':
         this._tone({ type: 'square', f0: 220, f1: 160, dur: 0.14, gain: 0.07 * v, filter: 'lowpass', cutoff0: 700 });
@@ -1430,7 +1436,7 @@ class AudioEngine {
       }
       case 'charge': {
         if (!this._gate('charge', 0.2)) return;
-        this._tone({ type: 'sawtooth', f0: 180, f1: 1500, dur: opts.dur || 0.9, gain: 0.075 * v, filter: 'bandpass', cutoff0: 400, cutoff1: 2400, q: 6 });
+        this._tone({ type: 'sawtooth', f0: 180, f1: 1500, dur: opts.dur || 0.9, gain: 0.17 * v, filter: 'bandpass', cutoff0: 320, cutoff1: 2000, q: 2.2 });
         break;
       }
       case 'beam':
@@ -1505,7 +1511,7 @@ class AudioEngine {
   setIntensity(v) { this._targetIntensity = clamp01(v); }
 
   _scheduler() {
-    if (!this.ready || !this.musicOn || this.ctx.state !== 'running') return;
+    if (!this.ready || !this.musicOn || (!this.offline && this.ctx.state !== 'running')) return;
     const spb = 60 / this._bpm;
     const stepDur = spb / 4;                      // 16th notes
     const horizon = this.ctx.currentTime + 0.16;

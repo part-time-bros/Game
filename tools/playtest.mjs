@@ -459,6 +459,56 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
   check('generative music scheduler runs', !sound.musicErr, sound.musicErr || '');
   console.log(`    ${sound.names} effects exercised, ${sound.voices} voices live after burst`);
 
+  // Render each effect offline and measure it: "no exception" is not the same
+  // as "audible", and a broken envelope would otherwise ship silently.
+  const levels = await page.evaluate(async () => {
+    const Engine = window.__NOVA.game.audio.constructor;
+    const names = ['shoot', 'shootHeavy', 'enemyShoot', 'hit', 'crit', 'kill', 'explosion', 'dash',
+      'pulse', 'pulseFail', 'overdrive', 'overdriveEnd', 'hurt', 'shieldHit', 'shieldBreak',
+      'shieldUp', 'pickup', 'heal', 'upgrade', 'uiHover', 'uiClick', 'uiBack', 'uiDeny',
+      'waveStart', 'waveClear', 'rift', 'bossSpawn', 'bossHurt', 'bossPhase', 'charge', 'beam',
+      'mortar', 'zap', 'barrier', 'victory', 'defeat'];
+    const out = [];
+    const rate = 22050;
+    for (const n of names) {
+      const off = new OfflineAudioContext(2, rate * 2, rate);
+      const eng = new Engine();
+      eng.init(off);
+      eng.setVolumes(1, 1, 1);
+      eng.play(n, { gain: 1 });
+      const buf = await off.startRendering();
+      const d = buf.getChannelData(0);
+      let peak = 0, sum = 0;
+      for (let i = 0; i < d.length; i++) { const v = Math.abs(d[i]); if (v > peak) peak = v; sum += v * v; }
+      out.push({ n, peak: +peak.toFixed(4), rms: +Math.sqrt(sum / d.length).toFixed(5) });
+    }
+    // and the generative score
+    const off = new OfflineAudioContext(2, rate * 3, rate);
+    const eng = new Engine();
+    eng.init(off);
+    eng.setVolumes(1, 1, 1);
+    eng.musicOn = true;
+    eng.musBus.gain.value = 1;
+    eng.intensity = 0.8;
+    eng._mode = 'combat';
+    for (let i = 0; i < 48; i++) eng._scheduleStep(i % 64, 0.05 + i * 0.06, 0.06);
+    const mbuf = await off.startRendering();
+    const md = mbuf.getChannelData(0);
+    let mpeak = 0, msum = 0;
+    for (let i = 0; i < md.length; i++) { const v = Math.abs(md[i]); if (v > mpeak) mpeak = v; msum += v * v; }
+    return { out, music: { peak: +mpeak.toFixed(4), rms: +Math.sqrt(msum / md.length).toFixed(5) } };
+  });
+  const silent = levels.out.filter((r) => r.peak < 0.012);
+  const clipping = levels.out.filter((r) => r.peak > 1.0);
+  check('every effect renders audible signal', silent.length === 0, silent.map((r) => `${r.n}=${r.peak}`).join(' '));
+  check('no effect clips the master bus', clipping.length === 0, clipping.map((r) => `${r.n}=${r.peak}`).join(' '));
+  check('soundtrack renders audible signal', levels.music.peak > 0.01 && levels.music.peak <= 1.0, `peak=${levels.music.peak} rms=${levels.music.rms}`);
+  const loudest = levels.out.slice().sort((a, b) => b.peak - a.peak).slice(0, 3);
+  const quietest = levels.out.slice().sort((a, b) => a.peak - b.peak).slice(0, 3);
+  console.log(`    loudest: ${loudest.map((r) => `${r.n} ${r.peak}`).join(', ')}`);
+  console.log(`    quietest: ${quietest.map((r) => `${r.n} ${r.peak}`).join(', ')}`);
+  console.log(`    music peak ${levels.music.peak} rms ${levels.music.rms}`);
+
   // ---------------- leaks ----------------
   section('RESOURCE LEAKS');
   const leak = await page.evaluate(() => {

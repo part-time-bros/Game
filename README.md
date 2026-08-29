@@ -104,6 +104,11 @@ Phantom (three dashes, glass) — unlocked by reaching waves 5 and 10.
 | Sound | WebAudio synthesis: oscillators, filtered noise bursts and a procedural convolution reverb. Thirty-six distinct effects. |
 | Music | A generative sequencer — drums, bass, arp and pads over a D-minor progression — whose layers, tempo and filter cutoffs follow combat intensity. |
 
+The mix was balanced by measurement rather than by ear: `node tools/audiomix.mjs`
+renders every effect through an `OfflineAudioContext` and prints peak, RMS and
+audible duration, which is how three effectively-silent cues and an
+enemy-louder-than-you imbalance were found and fixed.
+
 ## Architecture
 
 ```
@@ -134,6 +139,7 @@ tools/
   playtest.mjs        automated QA suite (70 checks)
   endurance.mjs       long soak + deep Endless run (leak/drift detection)
   balance.mjs         scripted bot campaigns for tuning
+  audiomix.mjs        offline render of every effect: peak / RMS / duration
   visual.mjs          staged scene capture for art review
   check.mjs           syntax check across all modules
 ```
@@ -173,7 +179,8 @@ same input path a human uses:
   quality switching, viewport storms
 - resilience: corrupt save payload, storage denied, WebGL context loss and
   restore, pool saturation, hostile delta times, a 320x480 viewport
-- audio: all 36 effects and the music scheduler
+- audio: all 36 effects and the music scheduler, plus an offline render of
+  every effect asserting it is audible and does not clip the master bus
 - performance and draw-call budgets
 
 `node tools/balance.mjs` runs bot campaigns at every difficulty and prints
@@ -184,6 +191,9 @@ wave-by-wave clear times, which is how the pacing above was tuned.
 - Bloom is a two-level Gaussian rather than a proper mip pyramid; on very wide
   displays the largest halos are slightly blocky at the Low quality tier.
 - The soundtrack is generative, not composed — it never resolves to a chorus.
+- The audio mix is verified numerically (levels, clipping, duration) but has
+  never been listened to on speakers; timbre judgements are inferred from the
+  synthesis, not heard.
 - Enemies path around obstacles by steering and separation, not a navmesh, so a
   Lancer occasionally clips a pillar corner during a charge (it stuns, which is
   the intended punish, but the collision reads as slightly abrupt).

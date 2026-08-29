@@ -1,12 +1,12 @@
 {
-  "when": "2026-08-29T01:50:23.007Z",
-  "passed": 70,
+  "when": "2026-08-29T02:00:34.308Z",
+  "passed": 73,
   "failed": 0,
   "results": [
     {
       "name": "game boots",
       "ok": true,
-      "detail": "1784ms"
+      "detail": "1749ms"
     },
     {
       "name": "no console errors on boot",
@@ -56,7 +56,7 @@
     {
       "name": "score accrues",
       "ok": true,
-      "detail": "score=199"
+      "detail": "score=216"
     },
     {
       "name": "wave 8 mixed composition runs clean",
@@ -66,12 +66,12 @@
     {
       "name": "enemy count stays bounded",
       "ok": true,
-      "detail": "max=14"
+      "detail": "max=11"
     },
     {
       "name": "projectiles stay bounded",
       "ok": true,
-      "detail": "max=12"
+      "detail": "max=17"
     },
     {
       "name": "wave 5 spawns warden",
@@ -176,7 +176,7 @@
     {
       "name": "campaign reaches a conclusion",
       "ok": true,
-      "detail": "results after 447s"
+      "detail": "results after 448s"
     },
     {
       "name": "all 15 waves are reachable",
@@ -209,9 +209,24 @@
       "detail": ""
     },
     {
+      "name": "every effect renders audible signal",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "no effect clips the master bus",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "soundtrack renders audible signal",
+      "ok": true,
+      "detail": "peak=0.741 rms=0.10311"
+    },
+    {
       "name": "geometry count stable across 12 runs",
       "ok": true,
-      "detail": "36 → 36"
+      "detail": "41 → 41"
     },
     {
       "name": "texture count stable across 12 runs",
@@ -251,7 +266,7 @@
     {
       "name": "move stick drives the ship",
       "ok": true,
-      "detail": "dx=27.1 dz=0.0"
+      "detail": "dx=27.4 dz=0.0"
     },
     {
       "name": "aim stick fires the repeater",
@@ -316,7 +331,7 @@
     {
       "name": "respects pool caps",
       "ok": true,
-      "detail": "enemies=36 projectiles=17"
+      "detail": "enemies=38 projectiles=26"
     },
     {
       "name": "survives hostile delta times",
@@ -336,12 +351,12 @@
     {
       "name": "sim cost under 4ms/frame at wave 12",
       "ok": true,
-      "detail": "0.05ms"
+      "detail": "0.04ms"
     },
     {
       "name": "draw calls under 90",
       "ok": true,
-      "detail": "54"
+      "detail": "62"
     },
     {
       "name": "no console errors across the whole suite",
