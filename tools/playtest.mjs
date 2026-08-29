@@ -170,10 +170,10 @@ ${content}
 
 async function shot(page, name, showcase = false) {
   await page.evaluate(() => { if (window.__NOVA) window.__NOVA.render(); });
-  await page.screenshot({ path: join(SHOTS, `${name}.png`) });
+  await page.screenshot({ path: join(SHOTS, `${name}.png`), animations: 'disabled' });
   if (showcase) {
     mkdirSync(SHOWCASE, { recursive: true });
-    await page.screenshot({ path: join(SHOWCASE, `${name}.jpg`), type: 'jpeg', quality: 82 });
+    await page.screenshot({ path: join(SHOWCASE, `${name}.jpg`), type: 'jpeg', quality: 82, animations: 'disabled' });
   }
 }
 

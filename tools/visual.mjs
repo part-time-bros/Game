@@ -146,7 +146,7 @@ async function main() {
     if (!code) { console.log(`  ? unknown scene ${name}`); continue; }
     await page.evaluate(new Function('N', code), await page.evaluateHandle(() => window.__NOVA));
     await page.evaluate(() => window.__NOVA.render());
-    await page.screenshot({ path: join(OUT, `${name}.png`) });
+    await page.screenshot({ path: join(OUT, `${name}.png`), animations: 'disabled' });
     console.log(`  ✓ ${name}.png`);
   }
 
