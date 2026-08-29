@@ -444,16 +444,41 @@ body.touch #crosshair{display:none;}
 /* ---------- touch ---------- */
 #touch-controls{position:absolute;inset:0;z-index:12;pointer-events:none;}
 #touch-controls[hidden]{display:none;}
-.stick{position:absolute;bottom:clamp(20px,7vh,60px);width:124px;height:124px;border-radius:50%;
-  border:1px solid rgba(70,230,255,.24);background:rgba(70,230,255,.05);pointer-events:auto;opacity:.55;}
-.stick i{position:absolute;left:50%;top:50%;width:52px;height:52px;margin:-26px 0 0 -26px;border-radius:50%;
-  background:rgba(70,230,255,.28);border:1px solid rgba(70,230,255,.55);box-shadow:0 0 18px rgba(70,230,255,.4);}
-#stick-move{left:clamp(16px,4vw,48px);}
-#stick-aim{right:clamp(16px,4vw,48px);}
-.tbtn{font-family:var(--f-display);font-size:11px;letter-spacing:.14em;color:var(--ink);background:rgba(70,230,255,.12);
-  border:1px solid rgba(70,230,255,.4);padding:12px 14px;pointer-events:auto;cursor:pointer;}
+/* Controls scale with the smaller viewport axis. A fixed 124px stick is the
+   right size on a phone and a postage stamp on a tablet, where the same control
+   covers a tenth of the screen and your thumb has much further to reach. */
+body.touch{
+  --stick:clamp(124px,20vmin,250px);
+  --stick-inset:clamp(16px,4vw,64px);
+  --stick-bottom:clamp(20px,7vh,72px);
+}
+.stick{
+  position:absolute;bottom:var(--stick-bottom);
+  width:var(--stick);height:var(--stick);border-radius:50%;
+  border:1px solid rgba(70,230,255,.24);background:rgba(70,230,255,.05);pointer-events:auto;opacity:.55;
+}
+/* Touchable well beyond the ring: on a big screen you should not have to find
+   the circle, only the corner. Invisible, and part of the stick's hit area. */
+.stick::before{content:'';position:absolute;inset:-16%;border-radius:50%;}
+.stick i{
+  position:absolute;left:50%;top:50%;
+  width:calc(var(--stick) * .42);height:calc(var(--stick) * .42);
+  margin:calc(var(--stick) * -.21) 0 0 calc(var(--stick) * -.21);border-radius:50%;
+  background:rgba(70,230,255,.28);border:1px solid rgba(70,230,255,.55);box-shadow:0 0 18px rgba(70,230,255,.4);
+}
+#stick-move{left:var(--stick-inset);}
+#stick-aim{right:var(--stick-inset);}
+.tbtn{
+  font-family:var(--f-display);font-size:clamp(11px,1.7vmin,20px);letter-spacing:.14em;color:var(--ink);
+  background:rgba(70,230,255,.12);border:1px solid rgba(70,230,255,.4);
+  padding:clamp(12px,1.7vmin,22px) clamp(14px,2.2vmin,30px);
+  pointer-events:auto;cursor:pointer;
+}
 .tbtn:active{background:rgba(70,230,255,.4);}
-.tbtn.pause{position:absolute;top:max(14px,env(safe-area-inset-top));right:clamp(14px,2.4vw,32px);padding:8px 14px;}
+.tbtn.pause{
+  position:absolute;top:max(14px,env(safe-area-inset-top));right:clamp(14px,2.4vw,32px);
+  padding:clamp(8px,1.2vmin,16px) clamp(14px,2vmin,26px);
+}
 
 /* ---------- touch layout ----------
    On a phone the thumbs own the bottom corners, so the vitals move up under
@@ -479,8 +504,9 @@ body.touch #toast-stack{top:clamp(112px,19vh,140px);}
 body.touch #banner{top:30%;}
 .touch-btns{
   position:absolute;right:clamp(10px,2.6vw,30px);
-  bottom:calc(clamp(20px,7vh,60px) + 138px);
-  display:flex;gap:8px;pointer-events:auto;
+  /* clears whatever the stick has grown to, rather than a baked-in 138px */
+  bottom:calc(var(--stick-bottom) + var(--stick) + 14px);
+  display:flex;gap:clamp(8px,1.4vmin,16px);pointer-events:auto;
 }
 
 #rotate-hint{display:none;z-index:40;place-items:center;text-align:center;padding:30px;background:rgba(3,4,12,.95);
@@ -1754,9 +1780,13 @@ class Input {
     const mkStick = (el, key, ownsAim) => {
       if (!el) return;
       const knob = el.querySelector('i');
-      const radius = 46;
+      // Measured, not baked in: the control scales with the viewport, so a
+      // constant travel radius would make a tablet's larger stick feel twitchy
+      // and reach full deflection a third of the way out.
+      const radiusOf = () => (el.clientWidth || 124) * 0.37;
       let id = null;
       const set = (dx, dz) => {
+        const radius = radiusOf();
         const len = lengthXZ(dx, dz);
         const k = len > radius ? radius / len : 1;
         knob.style.transform = `translate(${dx * k}px, ${dz * k}px)`;
@@ -2396,7 +2426,16 @@ class RigBuilder {
     return this;
   }
 
-  build(name = 'rig') {
+  /**
+   * build(name, faceZ)
+   * Parts are authored with the nose toward -Z because that reads naturally
+   * while sketching, but three.js points objects along +Z. Rotating the ROOT
+   * BONE rather than the vertices turns the whole hierarchy as one — bones,
+   * the parts authored in their local space, and every clip that drives them.
+   * Flipping vertices alone would leave the skeleton pointing the other way.
+   */
+  build(name = 'rig', faceZ = false) {
+    if (faceZ) this.bones[0].rot[1] += Math.PI;
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(this.pos, 3));
     g.setAttribute('normal', new THREE.Float32BufferAttribute(this.nrm, 3));
@@ -3800,8 +3839,11 @@ function buildRiftFrame() {
 
 /** Build once, share the geometry + skeleton + compiled clips across instances. */
 function pack(builder, clips, name, extra = {}) {
-  const { geometry, skeleton } = builder.build(name);
-  return { geometry, skeleton, clips: compileClips(skeleton, clips), ...extra };
+  // Everything with a front faces +Z; pass faceZ:false for radially symmetric
+  // shapes that have no meaningful nose.
+  const { faceZ, ...rest } = extra;
+  const { geometry, skeleton } = builder.build(name, faceZ !== false);
+  return { geometry, skeleton, clips: compileClips(skeleton, clips), ...rest };
 }
 
 // ======================================================================
@@ -4091,7 +4133,7 @@ function buildRiggedSplitter() {
       return c;
     })(),
   };
-  return pack(r, clips, 'splitter', { radius: 1.05, torso: 'core', limbs: ['shell0', 'shell1', 'shell2'] });
+  return pack(r, clips, 'splitter', { faceZ: false, radius: 1.05, torso: 'core', limbs: ['shell0', 'shell1', 'shell2'] });
 }
 
 // ======================================================================

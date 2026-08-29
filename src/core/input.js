@@ -117,9 +117,13 @@ export class Input {
     const mkStick = (el, key, ownsAim) => {
       if (!el) return;
       const knob = el.querySelector('i');
-      const radius = 46;
+      // Measured, not baked in: the control scales with the viewport, so a
+      // constant travel radius would make a tablet's larger stick feel twitchy
+      // and reach full deflection a third of the way out.
+      const radiusOf = () => (el.clientWidth || 124) * 0.37;
       let id = null;
       const set = (dx, dz) => {
+        const radius = radiusOf();
         const len = lengthXZ(dx, dz);
         const k = len > radius ? radius / len : 1;
         knob.style.transform = `translate(${dx * k}px, ${dz * k}px)`;

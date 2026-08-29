@@ -97,7 +97,16 @@ export class RigBuilder {
     return this;
   }
 
-  build(name = 'rig') {
+  /**
+   * build(name, faceZ)
+   * Parts are authored with the nose toward -Z because that reads naturally
+   * while sketching, but three.js points objects along +Z. Rotating the ROOT
+   * BONE rather than the vertices turns the whole hierarchy as one — bones,
+   * the parts authored in their local space, and every clip that drives them.
+   * Flipping vertices alone would leave the skeleton pointing the other way.
+   */
+  build(name = 'rig', faceZ = false) {
+    if (faceZ) this.bones[0].rot[1] += Math.PI;
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(this.pos, 3));
     g.setAttribute('normal', new THREE.Float32BufferAttribute(this.nrm, 3));

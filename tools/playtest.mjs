@@ -393,7 +393,11 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
     const waveLog = [];
     let picks = 0, frames = 0, lastWave = 0;
     const bad = [];
-    while (N.state() !== 'results' && frames < 60 * 60 * 12) {
+    // Wave composition is seeded, but enemy behaviour is not — attack timers,
+    // strafe choices and split angles all use Math.random. Observed runs reach
+    // wave 15 anywhere between 440s and 625s, so a 12-minute budget was inside
+    // the spread and failed on the slow tail. 18 gives it real headroom.
+    while (N.state() !== 'results' && frames < 60 * 60 * 18) {
       if (N.state() === 'refit') { g.ui.pickCardByIndex(0); picks++; continue; }
       const t = frames * dt;
       const a = t * 0.9;
@@ -428,7 +432,7 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
   check('all 15 waves are reachable', campaign.waveLog.length >= 15, `waves seen=${campaign.waveLog.length}`);
   check('refit fires between waves', campaign.picks >= 10, `picks=${campaign.picks}`);
   check('no NaN across a full campaign', campaign.bad.length === 0, campaign.bad.join(','));
-  if (campaign.summary) {
+  if (campaign.summary && campaign.state === 'results') {
     console.log(`    outcome: ${campaign.summary.victory ? 'VICTORY' : 'defeat'} on wave ${campaign.summary.wave}, rank ${campaign.summary.rank}, ${campaign.summary.kills} kills, ${campaign.summary.score} pts in ${campaign.summary.time}s`);
   }
   console.log('    wave pacing (wave@sec):', campaign.waveLog.map((w) => `${w.wave}@${w.t}`).join(' '));
@@ -675,6 +679,31 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
     check('touch pause button pauses', acted.paused);
     check('no errors on a touch device', terr.length === 0, terr.slice(0, 2).join(' | '));
 
+    // A control sized in fixed pixels is right on a phone and a postage stamp
+    // on a tablet, where it covers a tenth of the screen instead of a third.
+    const phoneStick = await tp.evaluate(() => {
+      const el = document.getElementById('stick-move');
+      return { w: Math.round(el.clientWidth), frac: +(el.clientWidth / window.innerHeight).toFixed(2) };
+    });
+    await tp.setViewportSize({ width: 1180, height: 820 });
+    await tp.evaluate(() => window.__NOVA.step(1 / 60, 4));
+    const tabletStick = await tp.evaluate(() => {
+      const el = document.getElementById('stick-move');
+      const btn = document.getElementById('tbtn-dash').getBoundingClientRect();
+      const stick = el.getBoundingClientRect();
+      return {
+        w: Math.round(el.clientWidth),
+        btnH: Math.round(btn.height),
+        // the action row is positioned off the stick size, so it must clear it
+        clears: btn.bottom <= stick.top + 1,
+      };
+    });
+    check('touch sticks scale up on a tablet', tabletStick.w > phoneStick.w * 1.25,
+      `${phoneStick.w}px phone -> ${tabletStick.w}px tablet`);
+    check('action buttons scale with them', tabletStick.btnH >= 44, `${tabletStick.btnH}px tall`);
+    check('the action row still clears the stick', tabletStick.clears);
+    await tp.setViewportSize({ width: 844, height: 390 });
+
     await tp.evaluate(() => { window.__NOVA.step(1 / 60, 120); window.__NOVA.render(); });
     await tp.screenshot({ path: join(SHOTS, '16-touch.png') });
     mkdirSync(SHOWCASE, { recursive: true });
@@ -903,6 +932,39 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
 
   // ---------------- rigs & animation ----------------
   section('RIGS & ANIMATION');
+  // A rig whose nose points down -Z flies and shoots tail-first: the muzzle
+  // spawns along the aim direction while the hull you can see points the other
+  // way. RigBuilder shipped without MeshBuilder's faceZ flip and every model
+  // was backwards, which is exactly what it looked like.
+  const facing = await page.evaluate(async () => {
+    const rig = await import('/src/render/rig.js');
+    const rm = await import('/src/render/rig-models.js');
+    // bone that must end up in front of the body once the model is built
+    // Only rigs with a bone out front. The seeder's eye is a part on a centred
+    // dome and the splitter is radially symmetric — neither has a nose to probe.
+    const FRONT = {
+      skitter: 'head', drone: 'eye', lancer: 'horn',
+      sentinel: 'emitter', harrower: 'spear', maw: 'jawT',
+    };
+    const build = { ...rm.RIGGED_ENEMIES, ...rm.RIGGED_BOSSES, ship: () => rm.buildRiggedShip('striker') };
+    const out = [];
+    for (const [name, bone] of Object.entries({ ...FRONT, ship: 'nose' })) {
+      const spec = build[name]();
+      const pose = new rig.Pose(spec.skeleton);
+      pose.update();
+      const i = spec.skeleton.boneIndex(bone);
+      if (i < 0) { out.push({ name, bone, z: NaN }); continue; }
+      const e = pose.matrices[i].elements;
+      out.push({ name, bone, z: +e[14].toFixed(2) });   // world Z of the bone origin
+    }
+    return out;
+  });
+  const backwards = facing.filter((f) => !(f.z > 0.2));
+  console.log(`    ${facing.map((f) => `${f.name}:${f.z}`).join('  ')}`);
+  check('every rig faces the way it travels', backwards.length === 0,
+    backwards.length ? `${backwards.map((f) => `${f.name} ${f.bone} at z=${f.z}`).join(', ')}` : `${facing.length} rigs nose-forward`);
+
+
   const rigs = await page.evaluate(async () => {
     const rig = await import('/src/render/rig.js');
     const rm = await import('/src/render/rig-models.js');

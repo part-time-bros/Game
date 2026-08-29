@@ -14,8 +14,11 @@ import { PALETTE, PRIM } from './models.js';
 
 /** Build once, share the geometry + skeleton + compiled clips across instances. */
 function pack(builder, clips, name, extra = {}) {
-  const { geometry, skeleton } = builder.build(name);
-  return { geometry, skeleton, clips: compileClips(skeleton, clips), ...extra };
+  // Everything with a front faces +Z; pass faceZ:false for radially symmetric
+  // shapes that have no meaningful nose.
+  const { faceZ, ...rest } = extra;
+  const { geometry, skeleton } = builder.build(name, faceZ !== false);
+  return { geometry, skeleton, clips: compileClips(skeleton, clips), ...rest };
 }
 
 // ======================================================================
@@ -305,7 +308,7 @@ export function buildRiggedSplitter() {
       return c;
     })(),
   };
-  return pack(r, clips, 'splitter', { radius: 1.05, torso: 'core', limbs: ['shell0', 'shell1', 'shell2'] });
+  return pack(r, clips, 'splitter', { faceZ: false, radius: 1.05, torso: 'core', limbs: ['shell0', 'shell1', 'shell2'] });
 }
 
 // ======================================================================
