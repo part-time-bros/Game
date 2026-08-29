@@ -2201,6 +2201,34 @@ function skyTexture(w = 2048, h = 1024) {
   });
 }
 
+/** Burn mark left where something died: irregular, soot-dark, hot at the rim. */
+function scorchTexture(size = 128) {
+  return cached('scorch', () => {
+    const rng = new RNG(5150);
+    const noise = valueNoise2D(rng, 12);
+    const c = canvas(size, size), ctx = c.getContext('2d');
+    const img = ctx.createImageData(size, size);
+    const half = size / 2;
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const dx = (x + 0.5 - half) / half, dy = (y + 0.5 - half) / half;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        const n = fbm(noise, x / size * 4, y / size * 4, 4);
+        const edge = clamp01(1 - d * (0.75 + n * 0.55));
+        const a = Math.pow(edge, 1.5);
+        const rim = Math.pow(clamp01(1 - Math.abs(d - 0.62) * 3.4), 2) * n;
+        const i = (y * size + x) * 4;
+        img.data[i] = Math.round(40 + rim * 215);
+        img.data[i + 1] = Math.round(18 + rim * 90);
+        img.data[i + 2] = Math.round(30 + rim * 120);
+        img.data[i + 3] = Math.round(clamp01(a * (0.55 + n * 0.6)) * 255);
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    return toTexture(c, { srgb: false });
+  });
+}
+
 /** Swirling rift portal disc used by spawn portals and the void hazards. */
 function riftTexture(size = 256) {
   return cached('rift', () => {
@@ -3914,7 +3942,7 @@ function buildRiggedSkitter() {
       return c;
     })(),
   };
-  return pack(r, clips, 'skitter', { radius: 0.85 });
+  return pack(r, clips, 'skitter', { radius: 0.85, torso: 'body', limbs: ['legFL', 'legFR', 'legBL', 'legBR'] });
 }
 
 // ======================================================================
@@ -3965,7 +3993,7 @@ function buildRiggedDrone() {
       return c;
     })(),
   };
-  return pack(r, clips, 'drone', { radius: 1.0 });
+  return pack(r, clips, 'drone', { radius: 1.0, torso: 'body', limbs: ['fin0', 'fin1', 'fin2'] });
 }
 
 // ======================================================================
@@ -4008,7 +4036,7 @@ function buildRiggedSplitter() {
       return c;
     })(),
   };
-  return pack(r, clips, 'splitter', { radius: 1.05 });
+  return pack(r, clips, 'splitter', { radius: 1.05, torso: 'core', limbs: ['shell0', 'shell1', 'shell2'] });
 }
 
 // ======================================================================
@@ -4061,7 +4089,7 @@ function buildRiggedSeeder() {
       return c;
     })(),
   };
-  return pack(r, clips, 'seeder', { radius: 1.25 });
+  return pack(r, clips, 'seeder', { radius: 1.25, torso: 'hull', limbs: ['leg0', 'leg1', 'leg2', 'leg3'] });
 }
 
 // ======================================================================
@@ -4135,7 +4163,7 @@ function buildRiggedLancer() {
       return c;
     })(),
   };
-  return pack(r, clips, 'lancer', { radius: 1.35 });
+  return pack(r, clips, 'lancer', { radius: 1.35, torso: 'body', limbs: ['legFL', 'legFR', 'legBL', 'legBR'] });
 }
 
 // ======================================================================
@@ -4198,7 +4226,7 @@ function buildRiggedSentinel() {
       return c;
     })(),
   };
-  return pack(r, clips, 'sentinel', { radius: 1.4 });
+  return pack(r, clips, 'sentinel', { radius: 1.4, torso: 'hip', limbs: ['leg0', 'leg1', 'leg2'] });
 }
 
 const RIGGED_ENEMIES = {
@@ -5543,12 +5571,14 @@ class BeamFX {
 class DebrisFX {
   constructor(scene, capacity = 40) {
     this.geos = [buildDebris(1).geometry, buildDebris(7).geometry, buildDebris(13).geometry];
-    this.mat = createNovaMaterial({ rim: 0.5, spec: 0.2 });
+    // per-chunk material so wreckage can carry the colour of whatever it came from
     this.pool = new Pool((i) => {
-      const mesh = new THREE.Mesh(this.geos[i % this.geos.length], this.mat);
+      const mat = createNovaMaterial({ rim: 0.5, spec: 0.2 });
+      const mesh = new THREE.Mesh(this.geos[i % this.geos.length], mat);
+      mesh.userData.mat = mat;
       mesh.visible = false;
       scene.add(mesh);
-      return { mesh, vx: 0, vy: 0, vz: 0, sx: 0, sy: 0, sz: 0, life: 0, maxLife: 1, scale: 1 };
+      return { mesh, mat, vx: 0, vy: 0, vz: 0, sx: 0, sy: 0, sz: 0, life: 0, maxLife: 1, scale: 1 };
     }, capacity, (it) => { it.mesh.visible = false; });
   }
 
@@ -5567,6 +5597,8 @@ class DebrisFX {
     it.mesh.position.set(x, y, z);
     it.mesh.rotation.set(Math.random() * TAU, Math.random() * TAU, Math.random() * TAU);
     it.mesh.scale.setScalar(it.scale);
+    it.mat.uniforms.uTint.value.set(opts.tint === undefined ? 0xffffff : opts.tint);
+    it.mat.uniforms.uEmitScale.value = opts.tint === undefined ? 1 : 1.5;
     it.mesh.visible = true;
     return it;
   }
@@ -5589,9 +5621,66 @@ class DebrisFX {
 
   clear() { this.pool.releaseAll(); }
   dispose() {
-    this.pool.items.forEach((it) => { if (it.mesh.parent) it.mesh.parent.remove(it.mesh); });
+    this.pool.items.forEach((it) => { it.mat.dispose(); if (it.mesh.parent) it.mesh.parent.remove(it.mesh); });
     this.geos.forEach((g) => g.dispose());
-    this.mat.dispose();
+  }
+}
+
+/**
+ * Persistent burn marks. The deck remembers where things died for a while,
+ * which makes a long fight feel like it happened somewhere.
+ */
+class ScorchFX {
+  constructor(scene, capacity = 34) {
+    this.geo = new THREE.PlaneGeometry(1, 1);
+    this.tex = scorchTexture();
+    this.capacity = capacity;
+    this.items = [];
+    this.next = 0;
+    for (let i = 0; i < capacity; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        map: this.tex, transparent: true, depthWrite: false, opacity: 0,
+        blending: THREE.NormalBlending, toneMapped: false, side: THREE.DoubleSide,
+      });
+      const mesh = new THREE.Mesh(this.geo, mat);
+      mesh.rotation.x = FLAT;
+      mesh.position.y = 0.035;
+      mesh.visible = false;
+      mesh.renderOrder = 1;
+      scene.add(mesh);
+      this.items.push({ mesh, mat, life: 0, maxLife: 1, peak: 0.55 });
+    }
+  }
+
+  add(x, z, radius, color = 0xffffff, life = 9) {
+    // oldest slot is recycled: a busy deck should stay smudged, not stack up
+    const it = this.items[this.next];
+    this.next = (this.next + 1) % this.capacity;
+    it.life = it.maxLife = life;
+    it.peak = 0.42 + Math.random() * 0.22;
+    it.mesh.position.set(x, 0.035, z);
+    it.mesh.rotation.z = Math.random() * TAU;
+    it.mesh.scale.set(radius * 2, radius * 2, 1);
+    it.mat.color.set(color);
+    it.mat.opacity = it.peak;
+    it.mesh.visible = true;
+    return it;
+  }
+
+  update(dt) {
+    for (const it of this.items) {
+      if (it.life <= 0) continue;
+      it.life -= dt;
+      if (it.life <= 0) { it.mesh.visible = false; it.mat.opacity = 0; continue; }
+      const k = it.life / it.maxLife;
+      it.mat.opacity = it.peak * (k > 0.75 ? (1 - k) * 4 : k / 0.75);
+    }
+  }
+
+  clear() { for (const it of this.items) { it.life = 0; it.mesh.visible = false; } }
+  dispose() {
+    this.items.forEach((it) => { it.mat.dispose(); if (it.mesh.parent) it.mesh.parent.remove(it.mesh); });
+    this.geo.dispose();
   }
 }
 
@@ -5831,6 +5920,12 @@ class World {
     this.islands = this._buildIslands();
     scene.add(this.islands);
 
+    // ---------- ground mist ----------
+    // Two slow-scrolling noise layers just above the deck. Cheap, but it gives
+    // the arena air: ships and shots visibly travel *through* something.
+    this.mist = this._buildMist();
+    scene.add(this.mist);
+
     // ---------- ambient motes ----------
     this.motes = this._buildMotes(420);
     scene.add(this.motes);
@@ -5895,6 +5990,65 @@ class World {
     mesh.frustumCulled = false;
     this._islandMat = mesh.material;
     return mesh;
+  }
+
+  _buildMist() {
+    const group = new THREE.Group();
+    const geo = new THREE.CircleGeometry(this.radius + 1, 72);
+    this._mistGeo = geo;
+    this._mistMats = [];
+    const layers = [
+      { y: 0.55, scale: 0.028, speed: 0.012, opacity: 0.22, color: 0x2f6fa8 },
+      { y: 1.9, scale: 0.017, speed: -0.008, opacity: 0.13, color: 0x6a4fb0 },
+    ];
+    for (const L of layers) {
+      const mat = new THREE.ShaderMaterial({
+        transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false,
+        side: THREE.DoubleSide,
+        uniforms: {
+          uTime: { value: 0 },
+          uNoise: { value: noiseTexture() },
+          uColor: { value: new THREE.Color(L.color) },
+          uOpacity: { value: L.opacity },
+          uScale: { value: L.scale },
+          uSpeed: { value: L.speed },
+          uRadius: { value: this.radius },
+        },
+        vertexShader: /* glsl */`
+          varying vec3 vWorld;
+          void main(){
+            vec4 w = modelMatrix * vec4(position, 1.0);
+            vWorld = w.xyz;
+            gl_Position = projectionMatrix * viewMatrix * w;
+          }
+        `,
+        fragmentShader: /* glsl */`
+          precision highp float;
+          uniform float uTime; uniform float uOpacity; uniform float uScale;
+          uniform float uSpeed; uniform float uRadius;
+          uniform vec3 uColor; uniform sampler2D uNoise;
+          varying vec3 vWorld;
+          void main(){
+            vec2 p = vWorld.xz * uScale;
+            float a = texture2D(uNoise, p + vec2(uTime * uSpeed, uTime * uSpeed * 0.6)).r;
+            float b = texture2D(uNoise, p * 2.1 - vec2(uTime * uSpeed * 1.7, 0.0)).g;
+            float m = smoothstep(0.26, 0.88, a * 0.65 + b * 0.5);
+            float edge = 1.0 - smoothstep(uRadius * 0.55, uRadius, length(vWorld.xz));
+            float alpha = m * edge * uOpacity;
+            if (alpha < 0.004) discard;
+            gl_FragColor = vec4(uColor * alpha, alpha);
+          }
+        `,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.position.y = L.y;
+      mesh.renderOrder = 5;
+      mesh.frustumCulled = false;
+      group.add(mesh);
+      this._mistMats.push(mat);
+    }
+    return group;
   }
 
   _buildMotes(count) {
@@ -5974,6 +6128,7 @@ class World {
     this.stabRingB.rotation.z = Math.PI / 3 + Math.cos(this.time * 0.33) * 0.4;
 
     this.islands.rotation.y += dt * 0.006;
+    for (const m of this._mistMats) m.uniforms.uTime.value = this.time;
     this._moteMat.uniforms.uTime.value = this.time;
     this.barrierMat.uniforms.uOpacity.value = 0.075 + this.threat * 0.10 + Math.sin(this.time * 1.7) * 0.02;
   }
@@ -5988,6 +6143,9 @@ class World {
 
   setMoteScale(px) { this._moteMat.uniforms.uScale.value = px; }
 
+  /** Mist is overdraw-only; the low quality tier does without it. */
+  setMistEnabled(on) { this.mist.visible = !!on; }
+
   dispose() {
     this.sky.geometry.dispose(); this.sky.material.dispose();
     this.floor.geometry.dispose(); this.floorMat.dispose();
@@ -5998,6 +6156,8 @@ class World {
     this.stabMat.dispose(); this.pillarMat.dispose();
     this.islands.geometry.dispose(); this._islandMat.dispose();
     this.motes.geometry.dispose(); this._moteMat.dispose();
+    this._mistGeo.dispose();
+    this._mistMats.forEach((m) => m.dispose());
   }
 }
 
@@ -6429,6 +6589,8 @@ class Enemies {
           mesh, mat, type: t, id: 0,
           pose, animator: pose ? new Animator(pose, spec.clips) : null,
           spin: 0, animState: '',
+          torso: spec.torso || null, limbs: spec.limbs || null,
+          flinch: 0, flinchX: 0, flinchZ: 0,
         };
       }, t.cap, (e) => { e.mesh.visible = false; });
     }
@@ -6491,6 +6653,7 @@ class Enemies {
     if (e.animator) {
       e.animator.reset();
       e.animState = '';
+      e.flinch = 0;
       e.spin = Math.random() * TAU;
       this._drivePose(e, 0);
     }
@@ -6603,8 +6766,8 @@ class Enemies {
 
       if (e.dying) {
         if (e.type.hidden) { this._remove(e, i); continue; }
-        if (e.animator) e.animator.update(dt * 0.35);
         e.spawnT += dt / 0.35;
+        if (e.animator) this._driveDeathPose(e, dt * 0.5);
         e.mat.uniforms.uDissolve.value = clamp01(e.spawnT);
         e.mesh.position.y = e.y + e.spawnT * 0.6;
         e.mesh.rotation.y += dt * 5;
@@ -6688,9 +6851,37 @@ class Enemies {
    * Map AI state onto animation clips. Clips are only re-played when the state
    * actually changes, so crossfades are not restarted every frame.
    */
+  /** Limp collapse while the corpse dissolves — the rig keeps working. */
+  _driveDeathPose(e, dt) {
+    const a = e.animator;
+    if (!a || !e.torso) return;
+    const k = clamp01(e.spawnT);
+    a.offsetRot(e.torso, 0.9 * k, 0.4 * k, 0.6 * k);
+    a.offsetPos(e.torso, 0, -0.7 * k, 0);
+    if (e.limbs) {
+      for (let i = 0; i < e.limbs.length; i++) {
+        const s = i % 2 ? 1 : -1;
+        a.offsetRot(e.limbs[i], 1.5 * k * s, 0.6 * k, 1.1 * k * s);
+      }
+    }
+    a.update(dt);
+  }
+
   _drivePose(e, dt) {
     const a = e.animator;
     e.spin += dt;
+    if (e.flinch > 0) {
+      e.flinch = Math.max(0, e.flinch - dt * 5.5);
+      const f = e.flinch * e.flinch * 0.34;
+      // flinch is in the entity's local frame, so rotate the world hit vector in
+      const c = Math.cos(-e.yaw), sn = Math.sin(-e.yaw);
+      const lx = e.flinchX * c - e.flinchZ * sn;
+      const lz = e.flinchX * sn + e.flinchZ * c;
+      if (e.torso) {
+        a.offsetRot(e.torso, lz * f, 0, -lx * f);
+        a.offsetPos(e.torso, lx * f * 0.35, 0, lz * f * 0.35);
+      }
+    }
     const speed = Math.hypot(e.vx, e.vz);
     const moving = speed > 1.4;
     const set = (name, opts) => {
@@ -6813,6 +7004,15 @@ class Enemies {
     if (e.dying) return 0;
     e.hp -= amount;
     e.flash = 1;
+    // a visible flinch away from the hit sells the impact more than a flash alone
+    if (e.animator && e.torso) {
+      const dx = opts.dx === undefined ? 0 : opts.dx;
+      const dz = opts.dz === undefined ? 0 : opts.dz;
+      const d = Math.hypot(dx, dz) || 1;
+      e.flinch = Math.min(1, e.flinch + 0.55 + Math.min(0.45, amount / e.maxHp));
+      e.flinchX = dx / d;
+      e.flinchZ = dz / d;
+    }
     if (opts.chill) { e.chill = Math.max(e.chill, opts.chill); e.chillTimer = 1.3; }
     if (opts.knock) {
       const dx = opts.dx === undefined ? 0 : opts.dx;
@@ -6841,8 +7041,13 @@ class Enemies {
       return;
     }
     g.fx.explode(e.x, e.y + 0.4, e.z, 0.55 + t.radius * 0.55, 0xffe9b0, t.color);
-    const chunks = e.elite ? 6 : 3;
-    for (let i = 0; i < chunks; i++) g.debris.spawn(e.x, e.y + 0.4, e.z, { speed: 7 + t.radius * 3, scale: 0.5 + t.radius * 0.35, life: 1.3 });
+    const chunks = e.elite ? 9 : 5;
+    for (let i = 0; i < chunks; i++) {
+      g.debris.spawn(e.x, e.y + 0.4 + Math.random() * t.radius, e.z, {
+        speed: 7 + t.radius * 3, scale: 0.45 + t.radius * 0.4, life: 1.5, tint: t.color,
+      });
+    }
+    g.scorch(e.x, e.z, 1.2 + t.radius * 0.9, t.color);
     g.rings.spawn(e.x, e.z, { color: t.color, from: 0.5, to: 2.6 + t.radius, duration: 0.34, thickness: 0.3 });
     g.audio.play('kill', { gain: clamp(0.4 + t.radius * 0.3, 0.3, 1) });
     g.world.addRipple(e.x, e.z, 0.35 + t.radius * 0.2);
@@ -10608,7 +10813,8 @@ class Game {
       this.rings = new RingFX(this.scene, 30);
       this.decals = new DecalFX(this.scene, 44);
       this.beams = new BeamFX(this.scene, 14);
-      this.debris = new DebrisFX(this.scene, 46);
+      this.debris = new DebrisFX(this.scene, 54);
+      this.scorches = new ScorchFX(this.scene, 34);
       this.shadows = new ShadowFX(this.scene, 140);
       this.screen = new ScreenFX();
       this.screen.shakeScale = save.settings.shake;
@@ -10693,6 +10899,7 @@ class Game {
     this.audio.setVolumes(s.master, s.music, s.sfx);
     this.renderer.setQuality(s.quality);
     if (this.fx) this.fx.setBudget(this.renderer.settings.particleScale);
+    if (this.world) this.world.setMistEnabled(this.renderer.quality !== 'low');
     if (this.screen) this.screen.shakeScale = reduce ? Math.min(s.shake, 0.25) : s.shake;
     document.body.classList.toggle('no-scanlines', !s.scanlines);
     document.body.classList.toggle('no-flash', !s.flashes);
@@ -10741,6 +10948,7 @@ class Game {
     this.decals.clear();
     this.beams.clear();
     this.debris.clear();
+    this.scorches.clear();
     this.fx.clear();
     this.timers.length = 0;
     this.screen.reset();
@@ -11104,6 +11312,7 @@ class Game {
       }
     }
     this.world.addRipple(x, z, clamp(radius / 10, 0.4, 2));
+    this.scorch(x, z, clamp(radius * 0.55, 1.5, 9), color);
     this.screen.addTrauma(clamp(radius * 0.02, 0.05, 0.5));
     this.audio.play('explosion', { size: clamp(radius / 8, 0.5, 1.6), gain: 0.8 });
     for (let i = 0; i < Math.min(6, radius * 0.6); i++) this.debris.spawn(x, 0.6, z, { speed: radius, scale: 0.6, life: 1.2 });
@@ -11128,6 +11337,11 @@ class Game {
         });
       }
     }
+  }
+
+  /** Leave a burn mark on the deck. */
+  scorch(x, z, radius, color) {
+    if (this.scorches) this.scorches.add(x, z, radius, color);
   }
 
   spawnEnemyAt(typeId, x, z) {
@@ -11283,6 +11497,7 @@ class Game {
     this.fx.update(dt);
     this.rings.update(dt);
     this.debris.update(dt);
+    this.scorches.update(dt);
     this.shadows.begin();
     this.shadows.end();
     this._syncComposite();
@@ -11324,6 +11539,7 @@ class Game {
     this.fx.update(dt);
     this.rings.update(dt);
     this.debris.update(dt);
+    this.scorches.update(dt);
     this.shadows.end();
 
     // combo decay
@@ -11512,6 +11728,7 @@ class Game {
     this.decals.dispose();
     this.beams.dispose();
     this.debris.dispose();
+    this.scorches.dispose();
     this.shadows.dispose();
     this.world.dispose();
     this.renderer.dispose();

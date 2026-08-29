@@ -103,6 +103,8 @@ export class Enemies {
           mesh, mat, type: t, id: 0,
           pose, animator: pose ? new Animator(pose, spec.clips) : null,
           spin: 0, animState: '',
+          torso: spec.torso || null, limbs: spec.limbs || null,
+          flinch: 0, flinchX: 0, flinchZ: 0,
         };
       }, t.cap, (e) => { e.mesh.visible = false; });
     }
@@ -165,6 +167,7 @@ export class Enemies {
     if (e.animator) {
       e.animator.reset();
       e.animState = '';
+      e.flinch = 0;
       e.spin = Math.random() * TAU;
       this._drivePose(e, 0);
     }
@@ -277,8 +280,8 @@ export class Enemies {
 
       if (e.dying) {
         if (e.type.hidden) { this._remove(e, i); continue; }
-        if (e.animator) e.animator.update(dt * 0.35);
         e.spawnT += dt / 0.35;
+        if (e.animator) this._driveDeathPose(e, dt * 0.5);
         e.mat.uniforms.uDissolve.value = clamp01(e.spawnT);
         e.mesh.position.y = e.y + e.spawnT * 0.6;
         e.mesh.rotation.y += dt * 5;
@@ -362,9 +365,37 @@ export class Enemies {
    * Map AI state onto animation clips. Clips are only re-played when the state
    * actually changes, so crossfades are not restarted every frame.
    */
+  /** Limp collapse while the corpse dissolves — the rig keeps working. */
+  _driveDeathPose(e, dt) {
+    const a = e.animator;
+    if (!a || !e.torso) return;
+    const k = clamp01(e.spawnT);
+    a.offsetRot(e.torso, 0.9 * k, 0.4 * k, 0.6 * k);
+    a.offsetPos(e.torso, 0, -0.7 * k, 0);
+    if (e.limbs) {
+      for (let i = 0; i < e.limbs.length; i++) {
+        const s = i % 2 ? 1 : -1;
+        a.offsetRot(e.limbs[i], 1.5 * k * s, 0.6 * k, 1.1 * k * s);
+      }
+    }
+    a.update(dt);
+  }
+
   _drivePose(e, dt) {
     const a = e.animator;
     e.spin += dt;
+    if (e.flinch > 0) {
+      e.flinch = Math.max(0, e.flinch - dt * 5.5);
+      const f = e.flinch * e.flinch * 0.34;
+      // flinch is in the entity's local frame, so rotate the world hit vector in
+      const c = Math.cos(-e.yaw), sn = Math.sin(-e.yaw);
+      const lx = e.flinchX * c - e.flinchZ * sn;
+      const lz = e.flinchX * sn + e.flinchZ * c;
+      if (e.torso) {
+        a.offsetRot(e.torso, lz * f, 0, -lx * f);
+        a.offsetPos(e.torso, lx * f * 0.35, 0, lz * f * 0.35);
+      }
+    }
     const speed = Math.hypot(e.vx, e.vz);
     const moving = speed > 1.4;
     const set = (name, opts) => {
@@ -487,6 +518,15 @@ export class Enemies {
     if (e.dying) return 0;
     e.hp -= amount;
     e.flash = 1;
+    // a visible flinch away from the hit sells the impact more than a flash alone
+    if (e.animator && e.torso) {
+      const dx = opts.dx === undefined ? 0 : opts.dx;
+      const dz = opts.dz === undefined ? 0 : opts.dz;
+      const d = Math.hypot(dx, dz) || 1;
+      e.flinch = Math.min(1, e.flinch + 0.55 + Math.min(0.45, amount / e.maxHp));
+      e.flinchX = dx / d;
+      e.flinchZ = dz / d;
+    }
     if (opts.chill) { e.chill = Math.max(e.chill, opts.chill); e.chillTimer = 1.3; }
     if (opts.knock) {
       const dx = opts.dx === undefined ? 0 : opts.dx;
@@ -515,8 +555,13 @@ export class Enemies {
       return;
     }
     g.fx.explode(e.x, e.y + 0.4, e.z, 0.55 + t.radius * 0.55, 0xffe9b0, t.color);
-    const chunks = e.elite ? 6 : 3;
-    for (let i = 0; i < chunks; i++) g.debris.spawn(e.x, e.y + 0.4, e.z, { speed: 7 + t.radius * 3, scale: 0.5 + t.radius * 0.35, life: 1.3 });
+    const chunks = e.elite ? 9 : 5;
+    for (let i = 0; i < chunks; i++) {
+      g.debris.spawn(e.x, e.y + 0.4 + Math.random() * t.radius, e.z, {
+        speed: 7 + t.radius * 3, scale: 0.45 + t.radius * 0.4, life: 1.5, tint: t.color,
+      });
+    }
+    g.scorch(e.x, e.z, 1.2 + t.radius * 0.9, t.color);
     g.rings.spawn(e.x, e.z, { color: t.color, from: 0.5, to: 2.6 + t.radius, duration: 0.34, thickness: 0.3 });
     g.audio.play('kill', { gain: clamp(0.4 + t.radius * 0.3, 0.3, 1) });
     g.world.addRipple(e.x, e.z, 0.35 + t.radius * 0.2);

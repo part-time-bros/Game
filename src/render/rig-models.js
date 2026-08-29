@@ -211,7 +211,7 @@ export function buildRiggedSkitter() {
       return c;
     })(),
   };
-  return pack(r, clips, 'skitter', { radius: 0.85 });
+  return pack(r, clips, 'skitter', { radius: 0.85, torso: 'body', limbs: ['legFL', 'legFR', 'legBL', 'legBR'] });
 }
 
 // ======================================================================
@@ -262,7 +262,7 @@ export function buildRiggedDrone() {
       return c;
     })(),
   };
-  return pack(r, clips, 'drone', { radius: 1.0 });
+  return pack(r, clips, 'drone', { radius: 1.0, torso: 'body', limbs: ['fin0', 'fin1', 'fin2'] });
 }
 
 // ======================================================================
@@ -305,7 +305,7 @@ export function buildRiggedSplitter() {
       return c;
     })(),
   };
-  return pack(r, clips, 'splitter', { radius: 1.05 });
+  return pack(r, clips, 'splitter', { radius: 1.05, torso: 'core', limbs: ['shell0', 'shell1', 'shell2'] });
 }
 
 // ======================================================================
@@ -358,7 +358,7 @@ export function buildRiggedSeeder() {
       return c;
     })(),
   };
-  return pack(r, clips, 'seeder', { radius: 1.25 });
+  return pack(r, clips, 'seeder', { radius: 1.25, torso: 'hull', limbs: ['leg0', 'leg1', 'leg2', 'leg3'] });
 }
 
 // ======================================================================
@@ -432,7 +432,7 @@ export function buildRiggedLancer() {
       return c;
     })(),
   };
-  return pack(r, clips, 'lancer', { radius: 1.35 });
+  return pack(r, clips, 'lancer', { radius: 1.35, torso: 'body', limbs: ['legFL', 'legFR', 'legBL', 'legBR'] });
 }
 
 // ======================================================================
@@ -495,7 +495,7 @@ export function buildRiggedSentinel() {
       return c;
     })(),
   };
-  return pack(r, clips, 'sentinel', { radius: 1.4 });
+  return pack(r, clips, 'sentinel', { radius: 1.4, torso: 'hip', limbs: ['leg0', 'leg1', 'leg2'] });
 }
 
 export const RIGGED_ENEMIES = {

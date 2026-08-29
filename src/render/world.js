@@ -6,6 +6,7 @@
  */
 import { TAU, clamp01, lerp } from '../core/util.js';
 import { createFloorMaterial, createSkyMaterial, createNovaMaterial, createEnergyMaterial } from './materials.js';
+import { noiseTexture } from './textures.js';
 import { MeshBuilder, PALETTE, buildPillar, buildStabilizer } from './models.js';
 
 export const ARENA_RADIUS = 46;
@@ -92,6 +93,12 @@ export class World {
     this.islands = this._buildIslands();
     scene.add(this.islands);
 
+    // ---------- ground mist ----------
+    // Two slow-scrolling noise layers just above the deck. Cheap, but it gives
+    // the arena air: ships and shots visibly travel *through* something.
+    this.mist = this._buildMist();
+    scene.add(this.mist);
+
     // ---------- ambient motes ----------
     this.motes = this._buildMotes(420);
     scene.add(this.motes);
@@ -156,6 +163,65 @@ export class World {
     mesh.frustumCulled = false;
     this._islandMat = mesh.material;
     return mesh;
+  }
+
+  _buildMist() {
+    const group = new THREE.Group();
+    const geo = new THREE.CircleGeometry(this.radius + 1, 72);
+    this._mistGeo = geo;
+    this._mistMats = [];
+    const layers = [
+      { y: 0.55, scale: 0.028, speed: 0.012, opacity: 0.22, color: 0x2f6fa8 },
+      { y: 1.9, scale: 0.017, speed: -0.008, opacity: 0.13, color: 0x6a4fb0 },
+    ];
+    for (const L of layers) {
+      const mat = new THREE.ShaderMaterial({
+        transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false,
+        side: THREE.DoubleSide,
+        uniforms: {
+          uTime: { value: 0 },
+          uNoise: { value: noiseTexture() },
+          uColor: { value: new THREE.Color(L.color) },
+          uOpacity: { value: L.opacity },
+          uScale: { value: L.scale },
+          uSpeed: { value: L.speed },
+          uRadius: { value: this.radius },
+        },
+        vertexShader: /* glsl */`
+          varying vec3 vWorld;
+          void main(){
+            vec4 w = modelMatrix * vec4(position, 1.0);
+            vWorld = w.xyz;
+            gl_Position = projectionMatrix * viewMatrix * w;
+          }
+        `,
+        fragmentShader: /* glsl */`
+          precision highp float;
+          uniform float uTime; uniform float uOpacity; uniform float uScale;
+          uniform float uSpeed; uniform float uRadius;
+          uniform vec3 uColor; uniform sampler2D uNoise;
+          varying vec3 vWorld;
+          void main(){
+            vec2 p = vWorld.xz * uScale;
+            float a = texture2D(uNoise, p + vec2(uTime * uSpeed, uTime * uSpeed * 0.6)).r;
+            float b = texture2D(uNoise, p * 2.1 - vec2(uTime * uSpeed * 1.7, 0.0)).g;
+            float m = smoothstep(0.26, 0.88, a * 0.65 + b * 0.5);
+            float edge = 1.0 - smoothstep(uRadius * 0.55, uRadius, length(vWorld.xz));
+            float alpha = m * edge * uOpacity;
+            if (alpha < 0.004) discard;
+            gl_FragColor = vec4(uColor * alpha, alpha);
+          }
+        `,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.position.y = L.y;
+      mesh.renderOrder = 5;
+      mesh.frustumCulled = false;
+      group.add(mesh);
+      this._mistMats.push(mat);
+    }
+    return group;
   }
 
   _buildMotes(count) {
@@ -235,6 +301,7 @@ export class World {
     this.stabRingB.rotation.z = Math.PI / 3 + Math.cos(this.time * 0.33) * 0.4;
 
     this.islands.rotation.y += dt * 0.006;
+    for (const m of this._mistMats) m.uniforms.uTime.value = this.time;
     this._moteMat.uniforms.uTime.value = this.time;
     this.barrierMat.uniforms.uOpacity.value = 0.075 + this.threat * 0.10 + Math.sin(this.time * 1.7) * 0.02;
   }
@@ -249,6 +316,9 @@ export class World {
 
   setMoteScale(px) { this._moteMat.uniforms.uScale.value = px; }
 
+  /** Mist is overdraw-only; the low quality tier does without it. */
+  setMistEnabled(on) { this.mist.visible = !!on; }
+
   dispose() {
     this.sky.geometry.dispose(); this.sky.material.dispose();
     this.floor.geometry.dispose(); this.floorMat.dispose();
@@ -259,5 +329,7 @@ export class World {
     this.stabMat.dispose(); this.pillarMat.dispose();
     this.islands.geometry.dispose(); this._islandMat.dispose();
     this.motes.geometry.dispose(); this._moteMat.dispose();
+    this._mistGeo.dispose();
+    this._mistMats.forEach((m) => m.dispose());
   }
 }

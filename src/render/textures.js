@@ -242,6 +242,34 @@ export function skyTexture(w = 2048, h = 1024) {
   });
 }
 
+/** Burn mark left where something died: irregular, soot-dark, hot at the rim. */
+export function scorchTexture(size = 128) {
+  return cached('scorch', () => {
+    const rng = new RNG(5150);
+    const noise = valueNoise2D(rng, 12);
+    const c = canvas(size, size), ctx = c.getContext('2d');
+    const img = ctx.createImageData(size, size);
+    const half = size / 2;
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const dx = (x + 0.5 - half) / half, dy = (y + 0.5 - half) / half;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        const n = fbm(noise, x / size * 4, y / size * 4, 4);
+        const edge = clamp01(1 - d * (0.75 + n * 0.55));
+        const a = Math.pow(edge, 1.5);
+        const rim = Math.pow(clamp01(1 - Math.abs(d - 0.62) * 3.4), 2) * n;
+        const i = (y * size + x) * 4;
+        img.data[i] = Math.round(40 + rim * 215);
+        img.data[i + 1] = Math.round(18 + rim * 90);
+        img.data[i + 2] = Math.round(30 + rim * 120);
+        img.data[i + 3] = Math.round(clamp01(a * (0.55 + n * 0.6)) * 255);
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    return toTexture(c, { srgb: false });
+  });
+}
+
 /** Swirling rift portal disc used by spawn portals and the void hazards. */
 export function riftTexture(size = 256) {
   return cached('rift', () => {

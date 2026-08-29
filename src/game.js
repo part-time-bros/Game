@@ -13,7 +13,7 @@ import { Renderer } from './render/renderer.js';
 import { GameCamera } from './render/camera.js';
 import { World } from './render/world.js';
 import { ParticleFX } from './render/particles.js';
-import { RingFX, DecalFX, BeamFX, DebrisFX, ShadowFX, ScreenFX } from './render/vfx.js';
+import { RingFX, DecalFX, BeamFX, DebrisFX, ShadowFX, ScreenFX, ScorchFX } from './render/vfx.js';
 import { globalUniforms, setLightDirection } from './render/materials.js';
 import { Player } from './entities/player.js';
 import { Enemies } from './entities/enemies.js';
@@ -110,7 +110,8 @@ export class Game {
       this.rings = new RingFX(this.scene, 30);
       this.decals = new DecalFX(this.scene, 44);
       this.beams = new BeamFX(this.scene, 14);
-      this.debris = new DebrisFX(this.scene, 46);
+      this.debris = new DebrisFX(this.scene, 54);
+      this.scorches = new ScorchFX(this.scene, 34);
       this.shadows = new ShadowFX(this.scene, 140);
       this.screen = new ScreenFX();
       this.screen.shakeScale = save.settings.shake;
@@ -195,6 +196,7 @@ export class Game {
     this.audio.setVolumes(s.master, s.music, s.sfx);
     this.renderer.setQuality(s.quality);
     if (this.fx) this.fx.setBudget(this.renderer.settings.particleScale);
+    if (this.world) this.world.setMistEnabled(this.renderer.quality !== 'low');
     if (this.screen) this.screen.shakeScale = reduce ? Math.min(s.shake, 0.25) : s.shake;
     document.body.classList.toggle('no-scanlines', !s.scanlines);
     document.body.classList.toggle('no-flash', !s.flashes);
@@ -243,6 +245,7 @@ export class Game {
     this.decals.clear();
     this.beams.clear();
     this.debris.clear();
+    this.scorches.clear();
     this.fx.clear();
     this.timers.length = 0;
     this.screen.reset();
@@ -606,6 +609,7 @@ export class Game {
       }
     }
     this.world.addRipple(x, z, clamp(radius / 10, 0.4, 2));
+    this.scorch(x, z, clamp(radius * 0.55, 1.5, 9), color);
     this.screen.addTrauma(clamp(radius * 0.02, 0.05, 0.5));
     this.audio.play('explosion', { size: clamp(radius / 8, 0.5, 1.6), gain: 0.8 });
     for (let i = 0; i < Math.min(6, radius * 0.6); i++) this.debris.spawn(x, 0.6, z, { speed: radius, scale: 0.6, life: 1.2 });
@@ -630,6 +634,11 @@ export class Game {
         });
       }
     }
+  }
+
+  /** Leave a burn mark on the deck. */
+  scorch(x, z, radius, color) {
+    if (this.scorches) this.scorches.add(x, z, radius, color);
   }
 
   spawnEnemyAt(typeId, x, z) {
@@ -785,6 +794,7 @@ export class Game {
     this.fx.update(dt);
     this.rings.update(dt);
     this.debris.update(dt);
+    this.scorches.update(dt);
     this.shadows.begin();
     this.shadows.end();
     this._syncComposite();
@@ -826,6 +836,7 @@ export class Game {
     this.fx.update(dt);
     this.rings.update(dt);
     this.debris.update(dt);
+    this.scorches.update(dt);
     this.shadows.end();
 
     // combo decay
@@ -1014,6 +1025,7 @@ export class Game {
     this.decals.dispose();
     this.beams.dispose();
     this.debris.dispose();
+    this.scorches.dispose();
     this.shadows.dispose();
     this.world.dispose();
     this.renderer.dispose();

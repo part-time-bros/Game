@@ -5,7 +5,7 @@
  */
 import { Pool, clamp, clamp01, easeOutCubic, TAU, lerp } from '../core/util.js';
 import { createRingMaterial, createEnergyMaterial, createNovaMaterial, createBeamMaterial } from './materials.js';
-import { shadowSprite } from './textures.js';
+import { shadowSprite, scorchTexture } from './textures.js';
 import { buildDebris } from './models.js';
 
 const FLAT = -Math.PI / 2;
@@ -179,12 +179,14 @@ export class BeamFX {
 export class DebrisFX {
   constructor(scene, capacity = 40) {
     this.geos = [buildDebris(1).geometry, buildDebris(7).geometry, buildDebris(13).geometry];
-    this.mat = createNovaMaterial({ rim: 0.5, spec: 0.2 });
+    // per-chunk material so wreckage can carry the colour of whatever it came from
     this.pool = new Pool((i) => {
-      const mesh = new THREE.Mesh(this.geos[i % this.geos.length], this.mat);
+      const mat = createNovaMaterial({ rim: 0.5, spec: 0.2 });
+      const mesh = new THREE.Mesh(this.geos[i % this.geos.length], mat);
+      mesh.userData.mat = mat;
       mesh.visible = false;
       scene.add(mesh);
-      return { mesh, vx: 0, vy: 0, vz: 0, sx: 0, sy: 0, sz: 0, life: 0, maxLife: 1, scale: 1 };
+      return { mesh, mat, vx: 0, vy: 0, vz: 0, sx: 0, sy: 0, sz: 0, life: 0, maxLife: 1, scale: 1 };
     }, capacity, (it) => { it.mesh.visible = false; });
   }
 
@@ -203,6 +205,8 @@ export class DebrisFX {
     it.mesh.position.set(x, y, z);
     it.mesh.rotation.set(Math.random() * TAU, Math.random() * TAU, Math.random() * TAU);
     it.mesh.scale.setScalar(it.scale);
+    it.mat.uniforms.uTint.value.set(opts.tint === undefined ? 0xffffff : opts.tint);
+    it.mat.uniforms.uEmitScale.value = opts.tint === undefined ? 1 : 1.5;
     it.mesh.visible = true;
     return it;
   }
@@ -225,9 +229,66 @@ export class DebrisFX {
 
   clear() { this.pool.releaseAll(); }
   dispose() {
-    this.pool.items.forEach((it) => { if (it.mesh.parent) it.mesh.parent.remove(it.mesh); });
+    this.pool.items.forEach((it) => { it.mat.dispose(); if (it.mesh.parent) it.mesh.parent.remove(it.mesh); });
     this.geos.forEach((g) => g.dispose());
-    this.mat.dispose();
+  }
+}
+
+/**
+ * Persistent burn marks. The deck remembers where things died for a while,
+ * which makes a long fight feel like it happened somewhere.
+ */
+export class ScorchFX {
+  constructor(scene, capacity = 34) {
+    this.geo = new THREE.PlaneGeometry(1, 1);
+    this.tex = scorchTexture();
+    this.capacity = capacity;
+    this.items = [];
+    this.next = 0;
+    for (let i = 0; i < capacity; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        map: this.tex, transparent: true, depthWrite: false, opacity: 0,
+        blending: THREE.NormalBlending, toneMapped: false, side: THREE.DoubleSide,
+      });
+      const mesh = new THREE.Mesh(this.geo, mat);
+      mesh.rotation.x = FLAT;
+      mesh.position.y = 0.035;
+      mesh.visible = false;
+      mesh.renderOrder = 1;
+      scene.add(mesh);
+      this.items.push({ mesh, mat, life: 0, maxLife: 1, peak: 0.55 });
+    }
+  }
+
+  add(x, z, radius, color = 0xffffff, life = 9) {
+    // oldest slot is recycled: a busy deck should stay smudged, not stack up
+    const it = this.items[this.next];
+    this.next = (this.next + 1) % this.capacity;
+    it.life = it.maxLife = life;
+    it.peak = 0.42 + Math.random() * 0.22;
+    it.mesh.position.set(x, 0.035, z);
+    it.mesh.rotation.z = Math.random() * TAU;
+    it.mesh.scale.set(radius * 2, radius * 2, 1);
+    it.mat.color.set(color);
+    it.mat.opacity = it.peak;
+    it.mesh.visible = true;
+    return it;
+  }
+
+  update(dt) {
+    for (const it of this.items) {
+      if (it.life <= 0) continue;
+      it.life -= dt;
+      if (it.life <= 0) { it.mesh.visible = false; it.mat.opacity = 0; continue; }
+      const k = it.life / it.maxLife;
+      it.mat.opacity = it.peak * (k > 0.75 ? (1 - k) * 4 : k / 0.75);
+    }
+  }
+
+  clear() { for (const it of this.items) { it.life = 0; it.mesh.visible = false; } }
+  dispose() {
+    this.items.forEach((it) => { it.mat.dispose(); if (it.mesh.parent) it.mesh.parent.remove(it.mesh); });
+    this.geo.dispose();
   }
 }
 
