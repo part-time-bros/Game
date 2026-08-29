@@ -168,6 +168,14 @@ post-processing addons: the scene renders into an HDR target, a bright pass
 feeds two blur levels, and one composite pass does bloom, ACES tone mapping,
 sRGB encode, vignette, chromatic aberration, grain and the overdrive grade.
 
+That pipeline degrades rather than fails. Plenty of phones expose WebGL2 without
+being able to *render* to RGBA16F, so the HDR path is earned at boot — check the
+extension, then make the driver prove it with a real framebuffer — and every
+allocation is re-checked for completeness. If frames still come back black, a
+watchdog reads the canvas back and steps down: HDR targets, then plain 8-bit
+targets, then straight to the canvas with the shaders tone mapping on their own.
+A duller frame beats a black one.
+
 Animation is bespoke for a related reason: three's skinning path needs GLSL3
 `texelFetch`, which would drag the whole shader family to ES 3.00. These models
 are hard-surface robots where every vertex belongs to exactly one bone, so

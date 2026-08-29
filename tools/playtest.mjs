@@ -78,7 +78,10 @@ async function main() {
   const consoleWarnings = [];
   // The webfont CDN is unreachable from the sandbox; the page is designed to
   // fall back silently, so that network error is not a game defect.
-  const IGNORE = /fonts\.(googleapis|gstatic)\.com|ERR_CONNECTION_RESET|ERR_NAME_NOT_RESOLVED|net::ERR_/;
+  // "GPU stall due to ReadPixels" is the driver noticing the render watchdog's
+  // one deliberate readback (see Renderer.watchdog) — the whole point is to
+  // trade one sync point for never shipping a black screen again.
+  const IGNORE = /fonts\.(googleapis|gstatic)\.com|ERR_CONNECTION_RESET|ERR_NAME_NOT_RESOLVED|net::ERR_|GPU stall due to ReadPixels/;
   page.on('console', (msg) => {
     const t = msg.type();
     const text = msg.text();
@@ -669,6 +672,114 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
     await tctx.close();
   }
 
+  // ---------------- gpu fallbacks ----------------
+  // A phone shipped a black scene under a perfectly healthy HUD: the device
+  // exposed WebGL2 but could not render to RGBA16F, so every pass pointed at an
+  // incomplete framebuffer. These run the real pipeline on a device profile with
+  // half-float rendering taken away.
+  section('GPU FALLBACKS');
+  {
+    const mobileCtx = async (blockHalfFloat) => {
+      const c = await page.context().browser().newContext({
+        viewport: { width: 851, height: 393 },
+        hasTouch: true, isMobile: true, deviceScaleFactor: 2.75,
+        userAgent: 'Mozilla/5.0 (Linux; Android 13; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+      });
+      await c.route('**/fonts.googleapis.com/**', (r) => r.abort());
+      await c.route('**/fonts.gstatic.com/**', (r) => r.abort());
+      await c.route('**cdnjs.cloudflare.com/**/three.min.js', (r) =>
+        r.fulfill({ path: join(ROOT, 'vendor', 'three.min.js'), contentType: 'text/javascript' }));
+      if (blockHalfFloat) {
+        await c.addInitScript(`(() => {
+          const blocked = ['EXT_color_buffer_float', 'EXT_color_buffer_half_float', 'WEBGL_color_buffer_float'];
+          const hc = HTMLCanvasElement.prototype.getContext;
+          HTMLCanvasElement.prototype.getContext = function (type, attrs) {
+            const ctx = hc.call(this, type, attrs);
+            if (ctx && /webgl/.test(type)) {
+              const ge = ctx.getExtension.bind(ctx);
+              ctx.getExtension = (n) => (blocked.indexOf(n) >= 0 ? null : ge(n));
+              const gs = ctx.getSupportedExtensions.bind(ctx);
+              ctx.getSupportedExtensions = () => gs().filter((n) => blocked.indexOf(n) < 0);
+            }
+            return ctx;
+          };
+        })();`);
+      }
+      const pg = await c.newPage();
+      await pg.goto(url, { waitUntil: 'domcontentloaded' });
+      await pg.waitForFunction(() => !!window.__NOVA, null, { timeout: 45000 });
+      await pg.evaluate(() => {
+        const N = window.__NOVA;
+        N.start('striker', 'pilot', 'campaign', 1);
+        N.skipCinematic();
+        // step() advances the sim; drawing lives in the rAF loop, so drive both
+        for (let i = 0; i < 90; i++) { N.step(1 / 60, 1); N.render(); }
+      });
+      return { c, pg };
+    };
+
+    // peak luminance of the frame actually on the canvas
+    const LUM = () => {
+      const c = document.getElementById('scene');
+      const t = document.createElement('canvas');
+      t.width = 96; t.height = 54;
+      const g = t.getContext('2d');
+      g.drawImage(c, 0, 0, 96, 54);
+      const d = g.getImageData(0, 0, 96, 54).data;
+      let sum = 0, max = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        const l = (d[i] + d[i + 1] + d[i + 2]) / 3;
+        sum += l; if (l > max) max = l;
+      }
+      return { mean: +(sum / (d.length / 4)).toFixed(2), max: +max.toFixed(1) };
+    };
+
+    {
+      const { c, pg } = await mobileCtx(true);
+      const r = await pg.evaluate((src) => {
+        const lum = new Function('return (' + src + ')()');
+        const N = window.__NOVA;
+        const out = { blocked: lum(), stage: N.stats().render.pipeline, hdr: N.stats().render.hdr, shaderErrors: N.stats().render.shaderErrors };
+        // put the broken HDR path back without the completeness check and let
+        // the watchdog notice the frames are black
+        N.forceHDR();
+        for (let i = 0; i < 150; i++) { N.step(1 / 60, 1); N.render(); }
+        out.recovered = lum();
+        out.recoveredStage = N.stats().render.pipeline;
+        // last rung: no offscreen targets at all
+        N.degradeRender(2);
+        for (let i = 0; i < 10; i++) { N.step(1 / 60, 1); N.render(); }
+        out.direct = lum();
+        out.directStage = N.stats().render.pipeline;
+        return out;
+      }, LUM.toString());
+
+      check('no half-float target support still renders the scene', r.blocked.mean > 6 && r.blocked.max > 60,
+        `mean ${r.blocked.mean}, peak ${r.blocked.max}`);
+      check('falls back to 8-bit targets rather than guessing from isWebGL2', r.stage === 1 && r.hdr === false,
+        `stage ${r.stage}, hdr ${r.hdr}`);
+      check('no shader link failures on the mobile profile', r.shaderErrors === 0, `${r.shaderErrors} failures`);
+      check('watchdog recovers a pipeline that draws black frames', r.recovered.mean > 6 && r.recoveredStage >= 1,
+        `mean ${r.recovered.mean} at stage ${r.recoveredStage}`);
+      check('direct-to-canvas last resort still draws', r.direct.mean > 6 && r.directStage === 2,
+        `mean ${r.direct.mean} at stage ${r.directStage}`);
+      await pg.screenshot({ path: join(SHOTS, '17-fallback-direct.png'), animations: 'disabled' });
+      await c.close();
+    }
+
+    {
+      const { c, pg } = await mobileCtx(false);
+      const r = await pg.evaluate((src) => {
+        const lum = new Function('return (' + src + ')()');
+        const N = window.__NOVA;
+        return { lum: lum(), stage: N.stats().render.pipeline, hdr: N.stats().render.hdr };
+      }, LUM.toString());
+      check('a capable device keeps the full HDR pipeline', r.stage === 0 && r.hdr === true, `stage ${r.stage}, hdr ${r.hdr}`);
+      check('mobile profile renders a lit scene', r.lum.mean > 6 && r.lum.max > 60, `mean ${r.lum.mean}, peak ${r.lum.max}`);
+      await c.close();
+    }
+  }
+
   // ---------------- rigs & animation ----------------
   section('RIGS & ANIMATION');
   const rigs = await page.evaluate(async () => {
@@ -855,11 +966,14 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
     ext.restoreContext();
     await new Promise((r) => setTimeout(r, 400));
     try { N.step(1 / 60, 30); N.render(); } catch (e) { threw = threw || e.message; }
-    return { skipped: false, lostFlag, threw, restored: !N.game.renderer.contextLost, state: N.state() };
+    return { skipped: false, lostFlag, threw, restored: !N.game.renderer.contextLost, state: N.state(), stage: N.game.renderer.pipelineStage };
   });
   if (ctxLoss.skipped) check('context loss handled', true, 'extension unavailable — skipped');
   else {
     check('survives WebGL context loss', !ctxLoss.threw, ctxLoss.threw || '');
+    // A lost context must not be mistaken for a GPU that cannot render — the
+    // watchdog once demoted the whole pipeline over a deliberate tab-kill.
+    check('context loss does not degrade the render pipeline', ctxLoss.stage === 0, `stage ${ctxLoss.stage}`);
     check('detects and clears the lost flag', ctxLoss.lostFlag === true && ctxLoss.restored === true, `lost=${ctxLoss.lostFlag} restored=${ctxLoss.restored}`);
   }
 

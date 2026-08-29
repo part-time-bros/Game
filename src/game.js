@@ -930,6 +930,8 @@ export class Game {
 
   render() {
     if (!this.renderer) return;
+    // Tells the render watchdog when a black frame would actually be a bug.
+    this.renderer.expectContent = this.state === 'playing' || this.state === 'paused' || this.state === 'refit';
     this.renderer.render(this.scene, this.camera.camera, this.screen);
   }
 
@@ -984,6 +986,8 @@ export class Game {
       resume: () => g.resume(),
       step: (dt = 1 / 60, times = 1) => { for (let i = 0; i < times; i++) g.tick(dt); },
       render: () => g.render(),
+      forceHDR: () => g.renderer.forceHDR(),
+      degradeRender: (n = 1) => { for (let i = 0; i < n; i++) g.renderer.degrade('forced by test'); return g.renderer.pipelineStage; },
       setWave: (n) => {
         g.waves.clear(); g.enemies.clear(); g.projectiles.clear(); g.boss.despawn(true);
         g.director.cancel();

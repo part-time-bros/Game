@@ -2660,7 +2660,23 @@ const globalUniforms = {
   uFogColor: { value: new THREE.Color(0.035, 0.045, 0.10) },
   uFogNear: { value: 90 },
   uFogFar: { value: 260 },
+  // 0 = write linear HDR for the composite pass to tone map (the normal path).
+  // 1 = the composite is gone (see Renderer.degrade) and each shader has to
+  // tone map and encode on its own. One shared object, so flipping it flips
+  // every material at once without touching a registry.
+  uOutput: { value: 0 },
 };
+
+/** Tone map + sRGB encode, matched to the composite pass, for the direct path. */
+const NOVA_OUT = /* glsl */`
+  uniform float uOutput;
+  vec3 novaOut(vec3 c){
+    if (uOutput < 0.5) return c;
+    c = (c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14);
+    c = clamp(c, 0.0, 1.0);
+    return mix(c * 12.92, 1.055 * pow(c, vec3(0.41666)) - 0.055, step(0.0031308, c));
+  }
+`;
 
 const NOVA_VERT = /* glsl */`
   attribute vec3 aColor;
@@ -2706,6 +2722,7 @@ const NOVA_VERT = /* glsl */`
 
 const NOVA_FRAG = /* glsl */`
   precision highp float;
+  ${NOVA_OUT}
   uniform vec3 uTint;
   uniform vec3 uFlashColor;
   uniform vec3 uRimColor;
@@ -2771,7 +2788,7 @@ const NOVA_FRAG = /* glsl */`
     float fog = smoothstep(uFogNear, uFogFar, vDepth) * uFogAmount;
     lit = mix(lit, uFogColor, fog);
 
-    gl_FragColor = vec4(lit, uOpacity);
+    gl_FragColor = vec4(novaOut(lit), uOpacity);
   }
 `;
 
@@ -2789,6 +2806,7 @@ function createNovaMaterial(opts = {}) {
     side: opts.side || THREE.FrontSide,
     toneMapped: false,
     uniforms: {
+      uOutput: globalUniforms.uOutput,
       uTime: globalUniforms.uTime,
       uLightDirView: globalUniforms.uLightDirView,
       uUpView: globalUniforms.uUpView,
@@ -2826,6 +2844,7 @@ function createEnergyMaterial(opts = {}) {
     side: opts.side || THREE.DoubleSide,
     toneMapped: false,
     uniforms: {
+      uOutput: globalUniforms.uOutput,
       uTime: globalUniforms.uTime,
       uColor: { value: new THREE.Color(opts.color !== undefined ? opts.color : 0x46e6ff) },
       uOpacity: { value: opts.opacity !== undefined ? opts.opacity : 1 },
@@ -2846,6 +2865,7 @@ function createEnergyMaterial(opts = {}) {
     `,
     fragmentShader: /* glsl */`
       precision highp float;
+  ${NOVA_OUT}
       uniform vec3 uColor; uniform float uOpacity; uniform float uPower; uniform float uPulse; uniform float uTime;
       varying vec3 vNormal; varying vec3 vViewPos; varying vec2 vUv;
       void main(){
@@ -2853,7 +2873,7 @@ function createEnergyMaterial(opts = {}) {
         vec3 V = normalize(-vViewPos);
         float fres = pow(1.0 - abs(dot(N, V)), uPower);
         float pulse = 1.0 + uPulse * sin(uTime * 6.0);
-        gl_FragColor = vec4(uColor * (fres * 2.1 + 0.16) * pulse, uOpacity * (fres * 0.95 + 0.1));
+        gl_FragColor = vec4(novaOut(uColor * (fres * 2.1 + 0.16) * pulse), uOpacity * (fres * 0.95 + 0.1));
       }
     `,
   });
@@ -2870,6 +2890,7 @@ function createFloorMaterial() {
     toneMapped: false,
     transparent: false,
     uniforms: {
+      uOutput: globalUniforms.uOutput,
       uTime: globalUniforms.uTime,
       uFogColor: globalUniforms.uFogColor,
       uFogNear: globalUniforms.uFogNear,
@@ -2901,6 +2922,7 @@ function createFloorMaterial() {
     `,
     fragmentShader: /* glsl */`
       precision highp float;
+  ${NOVA_OUT}
       uniform float uTime; uniform float uRadius; uniform float uThreat; uniform float uCoreGlow;
       uniform vec3 uBase; uniform vec3 uSeam; uniform vec3 uAccent; uniform vec3 uDanger; uniform vec3 uFogColor;
       uniform float uFogNear; uniform float uFogFar;
@@ -2981,7 +3003,7 @@ function createFloorMaterial() {
 
         float fog = smoothstep(uFogNear, uFogFar, vDepth);
         col = mix(col, uFogColor, fog * 0.9);
-        gl_FragColor = vec4(col, 1.0);
+        gl_FragColor = vec4(novaOut(col), 1.0);
       }
     `,
   });
@@ -3007,6 +3029,7 @@ function createParticleMaterial(texture) {
     blending: THREE.AdditiveBlending,
     toneMapped: false,
     uniforms: {
+      uOutput: globalUniforms.uOutput,
       uTexture: { value: texture || glowSprite() },
       uScale: { value: 500 },
       uBrightness: { value: 1 },
@@ -3028,6 +3051,7 @@ function createParticleMaterial(texture) {
     `,
     fragmentShader: /* glsl */`
       precision highp float;
+  ${NOVA_OUT}
       uniform sampler2D uTexture;
       uniform float uBrightness;
       varying vec3 vColor;
@@ -3036,7 +3060,7 @@ function createParticleMaterial(texture) {
         vec4 tex = texture2D(uTexture, gl_PointCoord);
         float a = tex.a * vAlpha;
         if (a < 0.004) discard;
-        gl_FragColor = vec4(vColor * uBrightness * a, a);
+        gl_FragColor = vec4(novaOut(vColor * uBrightness * a), a);
       }
     `,
   });
@@ -3051,6 +3075,7 @@ function createRingMaterial(opts = {}) {
     side: THREE.DoubleSide,
     toneMapped: false,
     uniforms: {
+      uOutput: globalUniforms.uOutput,
       uColor: { value: new THREE.Color(opts.color !== undefined ? opts.color : 0x46e6ff) },
       uOpacity: { value: 1 },
       uThickness: { value: opts.thickness !== undefined ? opts.thickness : 0.18 },
@@ -3065,6 +3090,7 @@ function createRingMaterial(opts = {}) {
     `,
     fragmentShader: /* glsl */`
       precision highp float;
+  ${NOVA_OUT}
       uniform vec3 uColor; uniform float uOpacity; uniform float uThickness; uniform float uFill;
       uniform float uProgress; uniform float uTime; uniform float uDashes;
       varying vec2 vUv;
@@ -3086,7 +3112,7 @@ function createRingMaterial(opts = {}) {
         }
         float alpha = (ring * dashMask * 1.4 + fill) * uOpacity * sweep;
         if (alpha < 0.004) discard;
-        gl_FragColor = vec4(uColor * alpha * 1.6, alpha);
+        gl_FragColor = vec4(novaOut(uColor * alpha * 1.6), alpha);
       }
     `,
   });
@@ -3116,6 +3142,7 @@ function createBeamMaterial(color = 0xff3ea5) {
     side: THREE.DoubleSide,
     toneMapped: false,
     uniforms: {
+      uOutput: globalUniforms.uOutput,
       uColor: { value: new THREE.Color(color) },
       uOpacity: { value: 1 },
       uTime: globalUniforms.uTime,
@@ -3127,6 +3154,7 @@ function createBeamMaterial(color = 0xff3ea5) {
     `,
     fragmentShader: /* glsl */`
       precision highp float;
+  ${NOVA_OUT}
       uniform vec3 uColor; uniform float uOpacity; uniform float uTime; uniform float uCharge;
       varying vec2 vUv;
       void main(){
@@ -3137,7 +3165,7 @@ function createBeamMaterial(color = 0xff3ea5) {
         float head = smoothstep(1.0, 0.86, vUv.x);
         float a = (core + halo) * uOpacity * flicker * head;
         vec3 col = mix(uColor, vec3(1.0), core * 0.75);
-        gl_FragColor = vec4(col * a * 2.2, a);
+        gl_FragColor = vec4(novaOut(col * a * 2.2), a);
       }
     `,
   });
@@ -4549,17 +4577,42 @@ class Renderer {
     this.renderer.info.autoReset = false;
 
     this.isWebGL2 = this.renderer.capabilities.isWebGL2;
-    this.hdrType = this.isWebGL2 ? THREE.HalfFloatType : THREE.UnsignedByteType;
+    // A shader that fails to link renders nothing but must not kill the frame
+    // loop; three throws by default, so take the report and carry on.
+    this.shaderErrors = [];
+    this.renderer.debug.onShaderError = (gl, program, vs, fs) => {
+      const msg = [gl.getProgramInfoLog(program), gl.getShaderInfoLog(vs), gl.getShaderInfoLog(fs)]
+        .filter(Boolean).join(' | ').replace(/\s+/g, ' ').trim();
+      if (this.shaderErrors.length < 12) this.shaderErrors.push(msg.slice(0, 240));
+      console.error('[nova-lance] shader link failed:', msg);
+    };
+
+    this.hdrType = this._probeHalfFloat() ? THREE.HalfFloatType : THREE.UnsignedByteType;
+    this.postEnabled = true;
+    this.pipelineStage = this.hdrType === THREE.HalfFloatType ? 0 : 1;
+    this.pipelineReason = this.pipelineStage ? 'no renderable half-float colour buffer' : '';
 
     this.quality = quality === 'auto' ? this._detectQuality() : quality;
     this.autoQuality = quality === 'auto';
     this.settings = QUALITY[this.quality] || QUALITY.medium;
 
+    this._wdFrames = 0;
+    this._wdBlack = 0;
+    this._wdPixelsOK = false;
+    this._wdDone = false;
+    this.expectContent = false;   // set by the game once a run is on screen
+
     this._buildTargets(1, 1);
     this._buildPasses();
 
     this._onLost = (e) => { e.preventDefault(); this.contextLost = true; this._orphaned = true; };
-    this._onRestored = () => { this.contextLost = false; this.resize(this._w, this._h, true); };
+    this._onRestored = () => {
+      this.contextLost = false;
+      // A restored context is a different GPU state; re-earn the HDR path.
+      this._wdFrames = 0; this._wdBlack = 0; this._wdPixelsOK = false; this._wdDone = false;
+      if (this.postEnabled) this.hdrType = this._probeHalfFloat() ? THREE.HalfFloatType : THREE.UnsignedByteType;
+      this.resize(this._w, this._h, true);
+    };
     canvas.addEventListener('webglcontextlost', this._onLost, false);
     canvas.addEventListener('webglcontextrestored', this._onRestored, false);
   }
@@ -4572,6 +4625,176 @@ class Renderer {
     if (mobile) return dm >= 6 && cores >= 8 ? 'medium' : 'low';
     if (cores <= 4 || dm <= 4) return 'medium';
     return 'high';
+  }
+
+  /**
+   * Half-float colour buffers carry the whole HDR chain, but a good number of
+   * mobile GPUs expose WebGL2 without being able to *render* to RGBA16F —
+   * `isWebGL2` answers a different question. Getting it wrong points every pass
+   * at an incomplete framebuffer, which shows up as a black scene under a
+   * perfectly healthy HUD. So: check the extension, then make the driver prove
+   * it with a real framebuffer before trusting it.
+   */
+  _probeHalfFloat() {
+    const gl = this.renderer.getContext();
+    if (!gl) return false;
+    // WebGL1 stays on 8-bit targets by choice: the devices that land there run
+    // at the 'low' tier with bloom off, so HDR buys nothing but new failure modes.
+    if (!this.isWebGL2) return false;
+    let internal, type;
+    try {
+      if (!gl.getExtension('EXT_color_buffer_float') && !gl.getExtension('EXT_color_buffer_half_float')) return false;
+      internal = gl.RGBA16F; type = gl.HALF_FLOAT;
+    } catch (e) { return false; }
+
+    const tex = gl.createTexture();
+    const fbo = gl.createFramebuffer();
+    let ok = false;
+    try {
+      while (gl.getError() !== gl.NO_ERROR) { /* drain */ }
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, internal, 4, 4, 0, gl.RGBA, type, null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE && gl.getError() === gl.NO_ERROR;
+    } catch (e) {
+      ok = false;
+    }
+    try {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      gl.deleteFramebuffer(fbo);
+      gl.deleteTexture(tex);
+      while (gl.getError() !== gl.NO_ERROR) { /* drain */ }
+    } catch (e) { /* nothing left to clean up */ }
+    this.renderer.resetState();   // we bound things behind three's back
+    return ok;
+  }
+
+  /**
+   * Test hook: re-arm the HDR path *without* the completeness check, so the
+   * black-frame watchdog can be exercised on a driver that cannot render to
+   * half-float. Not reachable from gameplay.
+   */
+  forceHDR() {
+    this.hdrType = THREE.HalfFloatType;
+    this.pipelineStage = 0;
+    this.pipelineReason = '';
+    this.postEnabled = true;
+    globalUniforms.uOutput.value = 0;
+    this._wdFrames = 0; this._wdBlack = 0; this._wdPixelsOK = false; this._wdDone = false;
+    this._allocTargets(this._pw || 1, this._ph || 1);
+  }
+
+  /** Are the targets we just allocated actually renderable on this driver? */
+  _targetsComplete() {
+    const r = this.renderer, gl = r.getContext();
+    if (!gl) return true;
+    const prev = r.getRenderTarget();
+    let ok = true;
+    try {
+      for (const k of ['sceneRT', 'brightRT']) {
+        r.setRenderTarget(this[k]);
+        if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) { ok = false; break; }
+      }
+    } catch (e) { ok = false; }
+    try { r.setRenderTarget(prev); } catch (e) { /* context is going away */ }
+    return ok;
+  }
+
+  /**
+   * Step the pipeline down one rung and say so. Stage 1 drops HDR targets for
+   * plain RGBA8 (bloom clamps at white, everything else is identical); stage 2
+   * abandons offscreen rendering entirely and draws straight to the canvas.
+   * A duller frame is always better than a black one.
+   */
+  degrade(reason) {
+    if (this.pipelineStage >= 2) return false;
+    this._wdPixelsOK = false;   // the new rung has to prove itself too
+    this.pipelineStage++;
+    this.pipelineReason = reason;
+    if (this.pipelineStage === 1) {
+      this.hdrType = THREE.UnsignedByteType;
+      this._buildTargets(this._pw || 1, this._ph || 1);
+    } else {
+      // No composite pass to tone map for us any more — the shaders take over.
+      this.postEnabled = false;
+      globalUniforms.uOutput.value = 1;
+      this._disposeTargets();
+    }
+    console.warn(`[nova-lance] render pipeline stepped down to stage ${this.pipelineStage} — ${reason}`);
+    return true;
+  }
+
+  /**
+   * Drivers fail in ways no capability query admits to, and the failure mode is
+   * the worst one available: a silent black screen. For the opening seconds we
+   * ask the context whether it is actually managing to draw, and step down
+   * until it is. The readback is a sync point, so it stops once frames are
+   * clean — or once we run out of rungs.
+   */
+  watchdog() {
+    if (this._wdDone || this.contextLost) return;
+    const gl = this.renderer.getContext();
+    if (!gl) { this._wdDone = true; return; }
+    // Only gameplay frames count against the budget — a long sit on the menu
+    // must not spend the watchdog before there is anything to look at.
+    if (this.expectContent) this._wdFrames++;
+
+    const err = gl.getError();
+    // A lost context is not a capability problem — the lost/restored handlers
+    // own it, and the restore re-probes from scratch. Stepping the pipeline
+    // down here would punish a tab switch.
+    if (err === gl.CONTEXT_LOST_WEBGL) return;
+    if (err === gl.INVALID_FRAMEBUFFER_OPERATION || err === gl.OUT_OF_MEMORY) {
+      this.degrade(`GL error 0x${err.toString(16)} while drawing`);
+      this._wdBlack = 0;
+    }
+
+    // Every capability query can come back clean and the driver still write
+    // nothing, so read back the frame we just produced and believe the pixels
+    // over the API. Only while the game says there is something to see, and
+    // only after several samples in a row, so a fade from black is not a bug.
+    if (!this._wdPixelsOK && this.pipelineStage < 2 && this.expectContent
+        && this._wdFrames >= 45 && this._wdFrames % 20 === 0) {
+      const lum = this._sampleFrame();
+      if (lum === 0) {
+        if (++this._wdBlack >= 3) {
+          this._wdBlack = 0;
+          this.degrade('the frame came back black');
+        }
+      } else if (lum > 0) {
+        // One good read is proof enough. readPixels stalls the GPU, so the
+        // healthy path pays for exactly one of them per run. GL errors keep
+        // being watched either way — they are free.
+        this._wdBlack = 0;
+        this._wdPixelsOK = true;
+      }
+    }
+
+    if (this._wdFrames > 600) this._wdDone = true;
+  }
+
+  /**
+   * Peak luminance of a small block at the centre of the frame just drawn.
+   * Reads the default framebuffer inside the same task as the draw, so it works
+   * without `preserveDrawingBuffer`. Returns -1 if the read is not possible.
+   */
+  _sampleFrame() {
+    const gl = this.renderer.getContext();
+    const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+    if (w < 32 || h < 32) return -1;
+    const buf = this._wdBuf || (this._wdBuf = new Uint8Array(16 * 16 * 4));
+    try {
+      gl.readPixels((w >> 1) - 8, (h >> 1) - 8, 16, 16, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+      if (gl.getError() !== gl.NO_ERROR) return -1;
+    } catch (e) { return -1; }
+    let max = 0;
+    for (let i = 0; i < buf.length; i += 4) {
+      const l = buf[i] + buf[i + 1] + buf[i + 2];
+      if (l > max) max = l;
+    }
+    return max;
   }
 
   _makeRT(w, h, type) {
@@ -4588,6 +4811,19 @@ class Renderer {
   }
 
   _buildTargets(w, h) {
+    this._allocTargets(w, h);
+    // Allocation succeeding is not the same as the driver being able to draw
+    // into it; ask before we point a whole frame at it.
+    if (this.hdrType !== THREE.UnsignedByteType && !this._targetsComplete()) {
+      this.hdrType = THREE.UnsignedByteType;
+      this.pipelineStage = Math.max(this.pipelineStage, 1);
+      this.pipelineReason = 'half-float targets are not framebuffer-complete';
+      console.warn(`[nova-lance] ${this.pipelineReason}; falling back to 8-bit targets`);
+      this._allocTargets(w, h);
+    }
+  }
+
+  _allocTargets(w, h) {
     this._disposeTargets();
     this.sceneRT = new THREE.WebGLRenderTarget(Math.max(1, w), Math.max(1, h), {
       minFilter: THREE.LinearFilter,
@@ -4788,7 +5024,7 @@ class Renderer {
     this.renderer.setSize(w, h, false);
     const pw = Math.floor(w * dpr), ph = Math.floor(h * dpr);
     this._pw = pw; this._ph = ph;
-    this._buildTargets(pw, ph);
+    if (this.postEnabled) this._buildTargets(pw, ph);
   }
 
   /** Full frame: scene into HDR target, bloom chain, composite to the canvas. */
@@ -4796,6 +5032,16 @@ class Renderer {
     if (this.contextLost) return;
     const r = this.renderer;
     r.info.reset();
+
+    if (!this.postEnabled) {
+      // Last rung: no offscreen targets at all. three tone maps and encodes on
+      // the way out, so the frame is flatter than the composite but honest.
+      r.setRenderTarget(null);
+      r.clear(true, true, false);
+      r.render(scene, camera);
+      this.watchdog();
+      return;
+    }
 
     r.setRenderTarget(this.sceneRT);
     r.clear(true, true, false);
@@ -4822,6 +5068,7 @@ class Renderer {
     u.uGrain.value = s.grain * (fx ? fx.grain : 1);
     r.setRenderTarget(null);
     r.render(this.quadScene, this.quadCam);
+    this.watchdog();
   }
 
   _blur(src, tmp, dst, spread) {
@@ -4865,6 +5112,9 @@ class Renderer {
       geometries: i.memory.geometries,
       textures: i.memory.textures,
       programs: i.programs ? i.programs.length : 0,
+      pipeline: this.pipelineStage,
+      hdr: this.hdrType === THREE.HalfFloatType,
+      shaderErrors: this.shaderErrors.length,
     };
   }
 
@@ -11623,6 +11873,8 @@ class Game {
 
   render() {
     if (!this.renderer) return;
+    // Tells the render watchdog when a black frame would actually be a bug.
+    this.renderer.expectContent = this.state === 'playing' || this.state === 'paused' || this.state === 'refit';
     this.renderer.render(this.scene, this.camera.camera, this.screen);
   }
 
@@ -11677,6 +11929,8 @@ class Game {
       resume: () => g.resume(),
       step: (dt = 1 / 60, times = 1) => { for (let i = 0; i < times; i++) g.tick(dt); },
       render: () => g.render(),
+      forceHDR: () => g.renderer.forceHDR(),
+      degradeRender: (n = 1) => { for (let i = 0; i < n; i++) g.renderer.degrade('forced by test'); return g.renderer.pipelineStage; },
       setWave: (n) => {
         g.waves.clear(); g.enemies.clear(); g.projectiles.clear(); g.boss.despawn(true);
         g.director.cancel();

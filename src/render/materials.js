@@ -23,7 +23,23 @@ export const globalUniforms = {
   uFogColor: { value: new THREE.Color(0.035, 0.045, 0.10) },
   uFogNear: { value: 90 },
   uFogFar: { value: 260 },
+  // 0 = write linear HDR for the composite pass to tone map (the normal path).
+  // 1 = the composite is gone (see Renderer.degrade) and each shader has to
+  // tone map and encode on its own. One shared object, so flipping it flips
+  // every material at once without touching a registry.
+  uOutput: { value: 0 },
 };
+
+/** Tone map + sRGB encode, matched to the composite pass, for the direct path. */
+const NOVA_OUT = /* glsl */`
+  uniform float uOutput;
+  vec3 novaOut(vec3 c){
+    if (uOutput < 0.5) return c;
+    c = (c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14);
+    c = clamp(c, 0.0, 1.0);
+    return mix(c * 12.92, 1.055 * pow(c, vec3(0.41666)) - 0.055, step(0.0031308, c));
+  }
+`;
 
 const NOVA_VERT = /* glsl */`
   attribute vec3 aColor;
@@ -69,6 +85,7 @@ const NOVA_VERT = /* glsl */`
 
 const NOVA_FRAG = /* glsl */`
   precision highp float;
+  ${NOVA_OUT}
   uniform vec3 uTint;
   uniform vec3 uFlashColor;
   uniform vec3 uRimColor;
@@ -134,7 +151,7 @@ const NOVA_FRAG = /* glsl */`
     float fog = smoothstep(uFogNear, uFogFar, vDepth) * uFogAmount;
     lit = mix(lit, uFogColor, fog);
 
-    gl_FragColor = vec4(lit, uOpacity);
+    gl_FragColor = vec4(novaOut(lit), uOpacity);
   }
 `;
 
@@ -152,6 +169,7 @@ export function createNovaMaterial(opts = {}) {
     side: opts.side || THREE.FrontSide,
     toneMapped: false,
     uniforms: {
+      uOutput: globalUniforms.uOutput,
       uTime: globalUniforms.uTime,
       uLightDirView: globalUniforms.uLightDirView,
       uUpView: globalUniforms.uUpView,
@@ -189,6 +207,7 @@ export function createEnergyMaterial(opts = {}) {
     side: opts.side || THREE.DoubleSide,
     toneMapped: false,
     uniforms: {
+      uOutput: globalUniforms.uOutput,
       uTime: globalUniforms.uTime,
       uColor: { value: new THREE.Color(opts.color !== undefined ? opts.color : 0x46e6ff) },
       uOpacity: { value: opts.opacity !== undefined ? opts.opacity : 1 },
@@ -209,6 +228,7 @@ export function createEnergyMaterial(opts = {}) {
     `,
     fragmentShader: /* glsl */`
       precision highp float;
+  ${NOVA_OUT}
       uniform vec3 uColor; uniform float uOpacity; uniform float uPower; uniform float uPulse; uniform float uTime;
       varying vec3 vNormal; varying vec3 vViewPos; varying vec2 vUv;
       void main(){
@@ -216,7 +236,7 @@ export function createEnergyMaterial(opts = {}) {
         vec3 V = normalize(-vViewPos);
         float fres = pow(1.0 - abs(dot(N, V)), uPower);
         float pulse = 1.0 + uPulse * sin(uTime * 6.0);
-        gl_FragColor = vec4(uColor * (fres * 2.1 + 0.16) * pulse, uOpacity * (fres * 0.95 + 0.1));
+        gl_FragColor = vec4(novaOut(uColor * (fres * 2.1 + 0.16) * pulse), uOpacity * (fres * 0.95 + 0.1));
       }
     `,
   });
@@ -233,6 +253,7 @@ export function createFloorMaterial() {
     toneMapped: false,
     transparent: false,
     uniforms: {
+      uOutput: globalUniforms.uOutput,
       uTime: globalUniforms.uTime,
       uFogColor: globalUniforms.uFogColor,
       uFogNear: globalUniforms.uFogNear,
@@ -264,6 +285,7 @@ export function createFloorMaterial() {
     `,
     fragmentShader: /* glsl */`
       precision highp float;
+  ${NOVA_OUT}
       uniform float uTime; uniform float uRadius; uniform float uThreat; uniform float uCoreGlow;
       uniform vec3 uBase; uniform vec3 uSeam; uniform vec3 uAccent; uniform vec3 uDanger; uniform vec3 uFogColor;
       uniform float uFogNear; uniform float uFogFar;
@@ -344,7 +366,7 @@ export function createFloorMaterial() {
 
         float fog = smoothstep(uFogNear, uFogFar, vDepth);
         col = mix(col, uFogColor, fog * 0.9);
-        gl_FragColor = vec4(col, 1.0);
+        gl_FragColor = vec4(novaOut(col), 1.0);
       }
     `,
   });
@@ -370,6 +392,7 @@ export function createParticleMaterial(texture) {
     blending: THREE.AdditiveBlending,
     toneMapped: false,
     uniforms: {
+      uOutput: globalUniforms.uOutput,
       uTexture: { value: texture || glowSprite() },
       uScale: { value: 500 },
       uBrightness: { value: 1 },
@@ -391,6 +414,7 @@ export function createParticleMaterial(texture) {
     `,
     fragmentShader: /* glsl */`
       precision highp float;
+  ${NOVA_OUT}
       uniform sampler2D uTexture;
       uniform float uBrightness;
       varying vec3 vColor;
@@ -399,7 +423,7 @@ export function createParticleMaterial(texture) {
         vec4 tex = texture2D(uTexture, gl_PointCoord);
         float a = tex.a * vAlpha;
         if (a < 0.004) discard;
-        gl_FragColor = vec4(vColor * uBrightness * a, a);
+        gl_FragColor = vec4(novaOut(vColor * uBrightness * a), a);
       }
     `,
   });
@@ -414,6 +438,7 @@ export function createRingMaterial(opts = {}) {
     side: THREE.DoubleSide,
     toneMapped: false,
     uniforms: {
+      uOutput: globalUniforms.uOutput,
       uColor: { value: new THREE.Color(opts.color !== undefined ? opts.color : 0x46e6ff) },
       uOpacity: { value: 1 },
       uThickness: { value: opts.thickness !== undefined ? opts.thickness : 0.18 },
@@ -428,6 +453,7 @@ export function createRingMaterial(opts = {}) {
     `,
     fragmentShader: /* glsl */`
       precision highp float;
+  ${NOVA_OUT}
       uniform vec3 uColor; uniform float uOpacity; uniform float uThickness; uniform float uFill;
       uniform float uProgress; uniform float uTime; uniform float uDashes;
       varying vec2 vUv;
@@ -449,7 +475,7 @@ export function createRingMaterial(opts = {}) {
         }
         float alpha = (ring * dashMask * 1.4 + fill) * uOpacity * sweep;
         if (alpha < 0.004) discard;
-        gl_FragColor = vec4(uColor * alpha * 1.6, alpha);
+        gl_FragColor = vec4(novaOut(uColor * alpha * 1.6), alpha);
       }
     `,
   });
@@ -479,6 +505,7 @@ export function createBeamMaterial(color = 0xff3ea5) {
     side: THREE.DoubleSide,
     toneMapped: false,
     uniforms: {
+      uOutput: globalUniforms.uOutput,
       uColor: { value: new THREE.Color(color) },
       uOpacity: { value: 1 },
       uTime: globalUniforms.uTime,
@@ -490,6 +517,7 @@ export function createBeamMaterial(color = 0xff3ea5) {
     `,
     fragmentShader: /* glsl */`
       precision highp float;
+  ${NOVA_OUT}
       uniform vec3 uColor; uniform float uOpacity; uniform float uTime; uniform float uCharge;
       varying vec2 vUv;
       void main(){
@@ -500,7 +528,7 @@ export function createBeamMaterial(color = 0xff3ea5) {
         float head = smoothstep(1.0, 0.86, vUv.x);
         float a = (core + halo) * uOpacity * flicker * head;
         vec3 col = mix(uColor, vec3(1.0), core * 0.75);
-        gl_FragColor = vec4(col * a * 2.2, a);
+        gl_FragColor = vec4(novaOut(col * a * 2.2), a);
       }
     `,
   });
