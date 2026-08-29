@@ -4,3 +4,4 @@ node_modules/
 tools/.artifacts/
 docs/shots-visual/
 dist/.artifact-preview.html
+tools/last-playtest.json
