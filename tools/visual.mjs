@@ -48,17 +48,72 @@ const SCENES = {
     const g = N.game;
     N.start('striker','pilot','campaign',1); N.step(1/60,60);
     g.waves.clear(); g.enemies.clear(); g.timers.length = 0;
-    g.player.position.set(-16,1.05,30); g.player.velocity.set(0,0,0);
+    g.player.position.set(0,1.05,44); g.player.velocity.set(0,0,0);
     const types = ['skitter','drone','splitter','seeder','lancer','sentinel'];
-    types.forEach((t,i) => {
-      const e = g.enemies.spawn(t, -15 + i*6, 22);
-      if (e) { e.state='active'; e.spawnT=1; e.mat.uniforms.uDissolve.value=0; e.mesh.scale.setScalar(e.scale); e.speed = 0; }
+    const spots = types.map((t,i) => ({ t, x: -11.5 + i*4.6, z: 20 }));
+    spots.forEach(s => {
+      const e = g.enemies.spawn(s.t, s.x, s.z);
+      if (e) { e.state='active'; e.spawnT=1; e.mat.uniforms.uDissolve.value=0; e.mesh.scale.setScalar(e.scale); e.pin = s; }
     });
-    N.step(1/60,6);
-    g.enemies.active.forEach(e => { e.x = -15 + g.enemies.active.indexOf(e)*6; e.z = 22; e.vx=0; e.vz=0; e.yaw = 0; });
-    N.step(1/60,1);
+    for (let i=0;i<60;i++){
+      N.step(1/60);
+      g.enemies.active.forEach(e => {
+        if (!e.pin) return;
+        e.x = e.pin.x; e.z = e.pin.z; e.vx = 0; e.vz = 0; e.yaw = 0.35;
+        e.mesh.position.set(e.x, e.mesh.position.y, e.z);
+      });
+    }
     g.rings.clear(); g.fx.clear(); g.ui.el.banner.innerHTML = '';
-    N.setCamera({ x: 0, y: 10, z: 36, tx: 0, ty: 1.2, tz: 21 });
+    N.setCamera({ x: 0, y: 10, z: 40, tx: 0, ty: 1.1, tz: 19.5 });
+    N.step(1/60,1);
+    g.ui.el.banner.innerHTML = '';
+  `,
+  anim_walk: `
+    const g = N.game;
+    N.start('striker','pilot','campaign',1); N.step(1/60,60);
+    g.waves.clear(); g.enemies.clear(); g.timers.length = 0;
+    g.player.position.set(0,1.05,44);
+    // let each walker actually travel so the gait plays
+    const set = [['skitter',-7],['lancer',0],['sentinel',7.5]];
+    set.forEach(([t,x]) => {
+      const e = g.enemies.spawn(t, x, 30);
+      if (e) { e.state='active'; e.spawnT=1; e.mat.uniforms.uDissolve.value=0; e.mesh.scale.setScalar(e.scale); e.walkX = x; }
+    });
+    for (let i=0;i<140;i++){
+      // vz stays non-zero so the gait clips run, but position is held for framing
+      g.enemies.active.forEach(e => { if (e.walkX !== undefined) { e.vx = 0; e.vz = -8; } });
+      N.step(1/60);
+      g.enemies.active.forEach(e => {
+        if (e.walkX === undefined) return;
+        e.x = e.walkX; e.z = 20; e.yaw = 0;
+        e.mesh.position.set(e.x, e.mesh.position.y, e.z);
+      });
+    }
+    g.rings.clear(); g.fx.clear(); g.ui.el.banner.innerHTML = '';
+    N.setCamera({ x: 0, y: 7, z: 36, tx: 0, ty: 1.2, tz: 19.5 });
+    N.step(1/60,1);
+    g.ui.el.banner.innerHTML = '';
+  `,
+  anim_attack: `
+    const g = N.game;
+    N.start('striker','pilot','campaign',1); N.step(1/60,60);
+    g.waves.clear(); g.enemies.clear(); g.timers.length = 0;
+    g.player.position.set(0,1.05,34);
+    const lancer = g.enemies.spawn('lancer', -7, 20);
+    const sentinel = g.enemies.spawn('sentinel', 0.5, 20);
+    const drone = g.enemies.spawn('drone', 8, 20);
+    [lancer,sentinel,drone].forEach(e => { if(e){ e.state='active'; e.spawnT=1; e.mat.uniforms.uDissolve.value=0; } });
+    N.step(1/60, 20);
+    if (lancer) { lancer.state='windup'; lancer.stateTime=0; }
+    if (sentinel) { sentinel.state='charging'; sentinel.stateTime=0; sentinel.aimX=0; sentinel.aimZ=34; }
+    if (drone && drone.animator) drone.animator.play('fire',{fade:0.03,restart:true});
+    for (let i=0;i<40;i++){
+      N.step(1/60);
+      const place = (e, x) => { if (!e) return; e.vx=0; e.vz=0; e.yaw=0; e.x=x; e.z=20; e.mesh.position.set(x, e.mesh.position.y, 20); };
+      place(lancer,-7); place(sentinel,0.5); place(drone,8);
+    }
+    g.rings.clear(); g.ui.el.banner.innerHTML = '';
+    N.setCamera({ x: 0, y: 8, z: 37, tx: 0, ty: 1.4, tz: 19.5 });
     N.step(1/60,1);
     g.ui.el.banner.innerHTML = '';
   `,

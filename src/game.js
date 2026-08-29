@@ -675,6 +675,9 @@ export class Game {
   // ==================================================================
   _loop(now) {
     requestAnimationFrame(this._loop);
+    // Debug/tooling hook: hands the canvas to an external renderer (the model
+    // viewer) without the game loop overwriting the frame.
+    if (this.debugFreeze) { this._last = now; return; }
     const t0 = performance.now();
     let dtReal = (now - this._last) / 1000;
     this._last = now;
@@ -962,6 +965,7 @@ export class Game {
       input: g.input,
       setInput: (o) => { g.input.override = o; },
       setCamera: (c) => { g.debugCamera = c; },
+      freeze: (on = true) => { g.debugFreeze = !!on; },
       clearInput: () => { g.input.override = null; },
       errors: [],
     };

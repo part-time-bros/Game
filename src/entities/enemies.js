@@ -15,6 +15,8 @@
  */
 import { Pool, clamp, clamp01, damp, lengthXZ, lerp, TAU, wrapAngle } from '../core/util.js';
 import { createNovaMaterial } from '../render/materials.js';
+import { Pose, Animator } from '../render/rig.js';
+import { RIGGED_ENEMIES } from '../render/rig-models.js';
 import {
   buildSkitter, buildDrone, buildSentinel, buildLancer, buildSeeder, buildSplitter, PALETTE,
 } from '../render/models.js';
@@ -25,7 +27,7 @@ export const ENEMY_TYPES = {
   skitter: {
     id: 'skitter', name: 'SKITTER', build: buildSkitter, cap: 64,
     hp: 24, speed: 15.5, radius: 0.85, score: 12, shards: 1, contact: 12, tier: 1,
-    color: 0xff3ea5, hover: 0.55, cost: 1,
+    color: 0xff3ea5, hover: 0, cost: 1,
     codex: 'Cheap swarm chassis. Rushes, lunges, detonates. Never fight one — fight the pattern.',
   },
   drone: {
@@ -43,13 +45,13 @@ export const ENEMY_TYPES = {
   seeder: {
     id: 'seeder', name: 'SEEDER', build: buildSeeder, cap: 14,
     hp: 88, speed: 7.5, radius: 1.25, score: 42, shards: 3, contact: 10, tier: 2,
-    color: 0xffb347, hover: 0.4, cost: 4,
+    color: 0xffb347, hover: 0, cost: 4,
     codex: 'Artillery frame. Lobs shells at where you are going. Standing still is a decision.',
   },
   lancer: {
     id: 'lancer', name: 'LANCER', build: buildLancer, cap: 18,
     hp: 135, speed: 9.0, radius: 1.35, score: 55, shards: 3, contact: 18, tier: 3,
-    color: 0xffb347, hover: 0.3, cost: 5,
+    color: 0xffb347, hover: 0, cost: 5,
     codex: 'Armoured ram. Winds up, then crosses the deck in a heartbeat. Dash sideways, never back.',
   },
   sentinel: {
@@ -83,16 +85,25 @@ export class Enemies {
     this.grid = new Map();
     this._queryOut = [];
 
+    this.specs = {};
     for (const t of ALL_ENEMY_TYPES) {
-      const spec = t.build();
+      // Rigged types bring a skeleton + compiled clips; the hidden boss proxy
+      // stays a plain static mesh.
+      const spec = RIGGED_ENEMIES[t.id] ? RIGGED_ENEMIES[t.id]() : t.build();
+      this.specs[t.id] = spec;
       this.geos[t.id] = spec.geometry;
       this.pools[t.id] = new Pool(() => {
-        const mat = createNovaMaterial({ rim: 0.95, spec: 0.4, rimColor: t.color, dissolveColor: t.color });
+        const pose = spec.skeleton ? new Pose(spec.skeleton) : null;
+        const mat = createNovaMaterial({ pose, rim: 0.95, spec: 0.4, rimColor: t.color, dissolveColor: t.color });
         const mesh = new THREE.Mesh(spec.geometry, mat);
         mesh.visible = false;
         mesh.frustumCulled = true;
         scene.add(mesh);
-        return { mesh, mat, type: t, id: 0 };
+        return {
+          mesh, mat, type: t, id: 0,
+          pose, animator: pose ? new Animator(pose, spec.clips) : null,
+          spin: 0, animState: '',
+        };
       }, t.cap, (e) => { e.mesh.visible = false; });
     }
   }
@@ -151,6 +162,12 @@ export class Enemies {
     e.scoreValue = t.score * (elite ? 2.4 : 1);
     e.fromSplit = !!opts.fromSplit;
 
+    if (e.animator) {
+      e.animator.reset();
+      e.animState = '';
+      e.spin = Math.random() * TAU;
+      this._drivePose(e, 0);
+    }
     e.mesh.visible = true;
     e.mesh.position.set(x, e.y, z);
     e.mesh.rotation.set(0, e.yaw, 0);
@@ -260,6 +277,7 @@ export class Enemies {
 
       if (e.dying) {
         if (e.type.hidden) { this._remove(e, i); continue; }
+        if (e.animator) e.animator.update(dt * 0.35);
         e.spawnT += dt / 0.35;
         e.mat.uniforms.uDissolve.value = clamp01(e.spawnT);
         e.mesh.position.y = e.y + e.spawnT * 0.6;
@@ -284,6 +302,7 @@ export class Enemies {
       if (e.type.hidden) { this._contact(e, dt, p); continue; }
       this._integrate(e, dt);
       this._contact(e, dt, p);
+      if (e.animator) { this._drivePose(e, dt); e.animator.update(dt); }
       this._sync(e, dt);
     }
   }
@@ -339,6 +358,73 @@ export class Enemies {
     }
   }
 
+  /**
+   * Map AI state onto animation clips. Clips are only re-played when the state
+   * actually changes, so crossfades are not restarted every frame.
+   */
+  _drivePose(e, dt) {
+    const a = e.animator;
+    e.spin += dt;
+    const speed = Math.hypot(e.vx, e.vz);
+    const moving = speed > 1.4;
+    const set = (name, opts) => {
+      if (e.animState === name) return;
+      e.animState = name;
+      a.play(name, opts);
+    };
+
+    switch (e.typeId) {
+      case 'skitter': {
+        if (e.state === 'lunge') set('lunge', { fade: 0.05, speed: 1.1 });
+        else if (moving) {
+          set('scuttle', { fade: 0.12 });
+          a.speed = clamp(speed / 9, 0.65, 2.4);
+        } else set('idle', { fade: 0.2 });
+        break;
+      }
+      case 'drone': {
+        if (a.playing === 'fire' && !a.finished) break;
+        set('hover', { fade: 0.15 });
+        a.offsetRot('ring', 0, e.spin * 2.2, 0);
+        a.offsetRot('body', 0, 0, clamp(-e.vx * 0.02, -0.35, 0.35));
+        break;
+      }
+      case 'splitter': {
+        const near = this.game.player.alive
+          && lengthXZ(this.game.player.position.x - e.x, this.game.player.position.z - e.z) < 13;
+        set(near ? 'strain' : 'idle', { fade: 0.25 });
+        a.offsetRot('core', e.spin * 0.9, e.spin * 1.3, 0);
+        break;
+      }
+      case 'seeder': {
+        if (a.playing === 'fire' && !a.finished) break;
+        set('idle', { fade: 0.2 });
+        break;
+      }
+      case 'lancer': {
+        if (e.state === 'windup') set('windup', { fade: 0.12 });
+        else if (e.state === 'charge') set('charge', { fade: 0.08, speed: 1.6 });
+        else if (e.state === 'stunned') set('stunned', { fade: 0.14 });
+        else {
+          set('prowl', { fade: 0.2 });
+          a.speed = clamp(0.55 + speed / 10, 0.55, 2.0);
+        }
+        break;
+      }
+      case 'sentinel': {
+        if (e.state === 'charging') set('brace', { fade: 0.16 });
+        else if (e.state === 'firing') set('fire', { fade: 0.05 });
+        else {
+          set('walk', { fade: 0.22 });
+          a.speed = clamp(0.35 + speed / 6, 0.35, 1.8);
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
   _chargeCrash(e) {
     const g = this.game;
     g.fx.dust(e.x, e.z, 4, 0xffb347, 12);
@@ -377,20 +463,12 @@ export class Enemies {
     if (e.type.hover > 0.2) y += Math.sin(e.bob * 2.2 + e.wobble) * 0.22;
     e.y = y;
     e.mesh.position.set(e.x, y, e.z);
-    const moveYaw = (Math.abs(e.vx) + Math.abs(e.vz) > 0.6) ? Math.atan2(e.vx, e.vz) : e.yaw;
     if (e.typeId === 'splitter') {
-      e.mesh.rotation.y += dt * 1.4;
-      e.mesh.rotation.x += dt * 0.7;
-    } else if (e.typeId === 'skitter') {
-      e.mesh.rotation.y = e.yaw;
-      e.mesh.rotation.z = Math.sin(e.bob * 12) * 0.14;
-      const squash = e.state === 'lunge' ? 1.25 : 1;
-      e.mesh.scale.set(e.scale * (2 - squash), e.scale * squash, e.scale * squash);
-    } else if (e.typeId === 'drone') {
-      e.mesh.rotation.y = e.yaw;
-      e.mesh.rotation.z = damp(e.mesh.rotation.z, clamp(-e.vx * 0.02, -0.4, 0.4), 0.0006, dt);
+      e.mesh.rotation.y += dt * 0.9;
+      e.mesh.rotation.x = Math.sin(e.bob * 0.8) * 0.25;
     } else {
       e.mesh.rotation.y = e.yaw;
+      e.mesh.rotation.z = 0;
     }
     // charging tells: the body glows hotter as the attack lands
     if (e.state === 'windup' || e.state === 'charging') {
@@ -579,6 +657,7 @@ const AI = {
       });
       g.fx.muzzle(e.x, e.y - 0.1, e.z, dx / l, dz / l, e.type.color, 0.7);
       g.audio.play('enemyShoot', { gain: 0.5 });
+      if (e.animator) { e.animator.play('fire', { fade: 0.04, restart: true }); e.animState = 'fire'; }
     }
   },
 
@@ -607,6 +686,7 @@ const AI = {
       });
       g.audio.play('mortar', { gain: 0.6 });
       g.fx.muzzle(e.x, e.y + 1.6, e.z, 0, 0, 0xffb347, 1);
+      if (e.animator) { e.animator.play('fire', { fade: 0.04, restart: true }); e.animState = 'fire'; }
       if (e.elite) {
         const a2 = Math.random() * TAU;
         g.projectiles.fireMortar(e.x, e.y + 1.4, e.z, tx + Math.cos(a2) * 6, tz + Math.sin(a2) * 6, {

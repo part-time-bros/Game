@@ -133,6 +133,13 @@ const tet = () => prim('tet', () => new THREE.TetrahedronGeometry(0.5));
 const tor = (r, t, rs, ts) => prim(`tor${r}_${t}_${rs}_${ts}`, () => new THREE.TorusGeometry(r, t, rs, ts));
 const tap = (rt, rb, seg) => prim(`tap${rt}_${rb}_${seg}`, () => new THREE.CylinderGeometry(rt, rb, 1, seg, 1));
 
+/** Shared primitive factory, also used by the rigged models in rig-models.js. */
+export const PRIM = {
+  box, cyl, cone, sph, ico, oct, tet, tor, tap,
+  wedge: (w, h, l, n) => wedgeGeometry(w, h, l, n),
+  spike: (len, base, sides) => spikeGeometry(len, base, sides),
+};
+
 /** Wedge/prism used all over the ship hulls (a box with a tapered nose). */
 function wedgeGeometry(w, h, l, noseScale = 0.25) {
   const hw = w / 2, hh = h / 2, hl = l / 2, n = noseScale;

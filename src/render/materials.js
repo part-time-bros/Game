@@ -10,6 +10,7 @@
  * correctly) with one key light, a hemisphere fill, a rim term and cheap spec.
  */
 import { noiseTexture, skyTexture, glowSprite } from './textures.js';
+import { MAX_BONES as RIG_MAX_BONES } from './rig.js';
 
 /** Uniform objects shared by reference across every material instance. */
 export const globalUniforms = {
@@ -28,6 +29,12 @@ const NOVA_VERT = /* glsl */`
   attribute vec3 aColor;
   attribute float aEmit;
   uniform float uTime;
+  #ifdef RIGGED
+    // Rigid bind: one bone per vertex, authored in that bone's local space,
+    // so the pose is a single matrix multiply with no inverse-bind term.
+    attribute float aBone;
+    uniform mat4 uBones[MAX_BONES];
+  #endif
   varying vec3 vColor;
   varying float vEmit;
   varying vec3 vNormal;
@@ -39,6 +46,11 @@ const NOVA_VERT = /* glsl */`
     vEmit = aEmit;
     vec3 pos = position;
     vec3 nrm = normal;
+    #ifdef RIGGED
+      mat4 boneMat = uBones[int(aBone)];
+      pos = (boneMat * vec4(pos, 1.0)).xyz;
+      nrm = mat3(boneMat) * nrm;
+    #endif
     // InstancedMesh support: three declares instanceMatrix for us, but this
     // shader does its own space transforms so it has to fold it in by hand.
     #ifdef USE_INSTANCING
@@ -126,11 +138,15 @@ const NOVA_FRAG = /* glsl */`
   }
 `;
 
-/** Standard lit surface used by every ship, enemy and prop. */
+/**
+ * Standard lit surface used by every ship, enemy and prop.
+ * Pass `pose` (a rig Pose) to compile the skinned variant for this material.
+ */
 export function createNovaMaterial(opts = {}) {
   const m = new THREE.ShaderMaterial({
     vertexShader: NOVA_VERT,
     fragmentShader: NOVA_FRAG,
+    defines: opts.pose ? { RIGGED: '', MAX_BONES: RIG_MAX_BONES } : {},
     transparent: !!opts.transparent,
     depthWrite: opts.depthWrite !== undefined ? opts.depthWrite : true,
     side: opts.side || THREE.FrontSide,
@@ -157,6 +173,7 @@ export function createNovaMaterial(opts = {}) {
       uSpec: { value: opts.spec !== undefined ? opts.spec : 0.35 },
       uFogAmount: { value: opts.fog !== undefined ? opts.fog : 1 },
       uDissolve: { value: 0 },
+      uBones: { value: opts.pose ? opts.pose.uniform : null },
     },
   });
   m.name = opts.name || 'nova';

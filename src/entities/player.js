@@ -8,7 +8,9 @@
  */
 import { clamp, clamp01, damp, dampAngle, lengthXZ, lerp, moveToward, TAU, wrapAngle } from '../core/util.js';
 import { createNovaMaterial, createEnergyMaterial, createRingMaterial } from '../render/materials.js';
-import { buildShip, buildGuardian, PALETTE } from '../render/models.js';
+import { buildGuardian, PALETTE } from '../render/models.js';
+import { buildRiggedShip } from '../render/rig-models.js';
+import { Pose, Animator } from '../render/rig.js';
 import { baseStats, MODULES } from '../systems/upgrades.js';
 import { SHIPS } from '../systems/ships.js';
 
@@ -27,18 +29,24 @@ export class Player {
     this.alive = true;
 
     this.group = new THREE.Group();
-    this.hullMat = createNovaMaterial({ rim: 0.85, spec: 0.6, rimColor: 0x8ff0ff });
     this.meshes = {};
     this._shipGeos = {};
+    // Each chassis gets its own rig instance and material: the bone uniform is
+    // per-material, so they cannot share one.
     for (const id of Object.keys(SHIPS)) {
-      const spec = buildShip(id);
+      const spec = buildRiggedShip(id);
       this._shipGeos[id] = spec.geometry;
-      const m = new THREE.Mesh(spec.geometry, this.hullMat);
+      const pose = new Pose(spec.skeleton);
+      const mat = createNovaMaterial({ pose, rim: 0.85, spec: 0.6, rimColor: 0x8ff0ff });
+      const m = new THREE.Mesh(spec.geometry, mat);
       m.visible = false;
+      m.frustumCulled = false;
       this.group.add(m);
-      this.meshes[id] = { mesh: m, glow: spec.glow };
+      this.meshes[id] = { mesh: m, glow: spec.glow, pose, mat, animator: new Animator(pose, spec.clips) };
     }
     this.body = null;
+    this.hullMat = this.meshes.striker.mat;
+    this.animator = this.meshes.striker.animator;
 
     this.shieldMat = createEnergyMaterial({ color: 0x46e6ff, opacity: 0.0, power: 3.6, pulse: 0.1 });
     this.shieldMesh = new THREE.Mesh(new THREE.SphereGeometry(2.05, 20, 14), this.shieldMat);
@@ -90,6 +98,11 @@ export class Player {
     entry.mesh.visible = true;
     this.body = entry.mesh;
     this.glowColor = entry.glow;
+    this.hullMat = entry.mat;
+    this.animator = entry.animator;
+    this.animator.reset();
+    this.animState = '';
+    this.recoil = 0;
     this.hullMat.uniforms.uRimColor.value.set(entry.glow);
     this.shieldMat.uniforms.uColor.value.set(entry.glow);
     this.ringMat.uniforms.uColor.value.set(entry.glow);
@@ -336,6 +349,7 @@ export class Player {
     }
     this.shotsFired += n;
 
+    this.recoil = 1;
     g.fx.muzzle(px, HOVER_Y, pz, this.aimDir.x, this.aimDir.z, od ? 0xffc24a : this.glowColor, od ? 1.3 : 1);
     g.audio.play('shoot', { gain: 0.85, pitch: od ? 1.18 : 1 });
     this.velocity.x -= this.aimDir.x * 1.1;
@@ -594,9 +608,37 @@ export class Player {
 
   _syncGuardians(dt, force) { this._updateGuardians(force ? 0 : dt); }
 
+  /** Map flight state onto ship clips, then layer the weapon recoil. */
+  _driveAnim(dt) {
+    const a = this.animator;
+    if (!a) return;
+    const set = (name, opts) => {
+      if (this.animState === name) return;
+      this.animState = name;
+      a.play(name, opts);
+    };
+    if (this.dashTimer > 0) set('dash', { fade: 0.05 });
+    else if (this.overdriveActive > 0) set('overdrive', { fade: 0.2 });
+    else if (this.speed > this.stats.moveSpeed * 0.25) set('cruise', { fade: 0.22 });
+    else set('idle', { fade: 0.3 });
+
+    this.recoil = Math.max(0, this.recoil - dt * 7);
+    if (this.recoil > 0) {
+      a.offsetPos('nose', 0, 0, this.recoil * 0.3);
+      a.offsetRot('hull', -this.recoil * 0.05, 0, 0);
+    }
+    // bank the wings with lateral motion for a bit of extra life
+    const fwdX = Math.sin(this.yaw), fwdZ = Math.cos(this.yaw);
+    const lateral = clamp((this.velocity.x * fwdZ - this.velocity.z * fwdX) * 0.012, -0.3, 0.3);
+    a.offsetRot('wingL', 0, 0, -lateral);
+    a.offsetRot('wingR', 0, 0, -lateral);
+    a.update(dt);
+  }
+
   _updateVisual(dt, dead) {
     if (dead) return;
     const g = this.game;
+    this._driveAnim(dt);
     this.bob += dt;
     const bobY = Math.sin(this.bob * 2.6) * 0.07;
     this.group.position.set(this.position.x, this.position.y + bobY, this.position.z);
@@ -646,7 +688,7 @@ export class Player {
 
   dispose() {
     for (const id in this._shipGeos) this._shipGeos[id].dispose();
-    this.hullMat.dispose();
+    for (const id in this.meshes) this.meshes[id].mat.dispose();
     this.shieldMesh.geometry.dispose();
     this.shieldMat.dispose();
     this.groundRing.geometry.dispose();
