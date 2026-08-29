@@ -38,7 +38,7 @@ export class UI {
       'module-strip', 'crosshair', 'indicators', 'floaters', 'banner', 'toast-stack', 'perf',
       'damage-flash', 'overdrive-tint', 'ship-cards', 'difficulty-seg', 'difficulty-hint',
       'mode-seg', 'mode-hint', 'opt-list', 'keylist', 'codex', 'stat-grid', 'unlock-list',
-      'upgrade-cards', 'refit-sub', 'refit-timer', 'reroll-btn', 'pause-stats', 'result-rank',
+      'upgrade-cards', 'refit-sub', 'refit-timer', 'reroll-btn', 'refit-build', 'pause-stats', 'result-rank',
       'result-title', 'result-sub', 'result-stats', 'result-modules', 'menu-best', 'menu-tip',
       'menu-records-sub', 'menu-launch-sub', 'touch-controls', 'stick-move', 'stick-aim',
       'tbtn-dash', 'tbtn-pulse', 'tbtn-over', 'tbtn-pause',
@@ -367,6 +367,15 @@ export class UI {
     this.el['reroll-btn'].textContent = `REROLL (${rerolls})`;
     this.el['reroll-btn'].disabled = rerolls <= 0;
 
+    const installed = [...this.game.player.modules.entries()];
+    this.el['refit-build'].innerHTML = installed.length
+      ? installed.map(([id, n]) => {
+        const m = MODULES[id];
+        const c = RARITY_INFO[m.rarity].color;
+        return `<span style="border-color:${c}44"><b style="color:${c}">${m.name}</b>${n > 1 ? ` ×${n}` : ''}</span>`;
+      }).join('')
+      : '';
+
     offers.forEach((mod, i) => {
       const owned = this.game.player.modules.get(mod.id) || 0;
       const info = moduleLabel(mod, owned);
@@ -438,7 +447,8 @@ export class UI {
       return `<span style="border-color:${RARITY_INFO[m.rarity].color}55;color:${RARITY_INFO[m.rarity].color}">${m.name}${n > 1 ? ` ×${n}` : ''}</span>`;
     });
     const unlockLines = (summary.unlocked || []).map((u) => `<span style="border-color:#7dff9e;color:#7dff9e">UNLOCKED — ${u}</span>`);
-    this.el['result-modules'].innerHTML = unlockLines.concat(mods).join('');
+    const seed = `<span title="Run seed — the same seed replays the same wave order">SEED ${summary.seed}</span>`;
+    this.el['result-modules'].innerHTML = unlockLines.concat(mods).concat([seed]).join('');
     this.show('results');
   }
 
@@ -612,6 +622,10 @@ export class UI {
   floatText(worldPos, text, cls = '') {
     if (!this.game.save.settings.damageNumbers && (cls === '' || cls === 'crit')) return;
     const g = this.game;
+    // Hard cap: animation callbacks and timers can stall (throttled tab, a very
+    // low frame rate), and unbounded floaters would then pile up in the DOM.
+    const host = this.el.floaters;
+    while (host.childElementCount >= 44) host.removeChild(host.firstChild);
     const p = g.camera.worldToScreen(worldPos.x, (worldPos.y || 1) + 1.4, worldPos.z, g.width, g.height);
     if (p.behind) return;
     const el = this.floatPool.pop() || document.createElement('div');
@@ -619,7 +633,7 @@ export class UI {
     el.textContent = text;
     el.style.left = `${p.x}px`;
     el.style.top = `${p.y}px`;
-    this.el.floaters.appendChild(el);
+    host.appendChild(el);
     const done = () => {
       el.removeEventListener('animationend', done);
       if (el.parentNode) el.parentNode.removeChild(el);

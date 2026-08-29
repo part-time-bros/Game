@@ -8,7 +8,13 @@
     "dev": "node tools/serve.js",
     "build": "node tools/build.js",
     "test": "node tools/playtest.mjs",
-    "test:quick": "node tools/playtest.mjs --quick"
+    "test:quick": "node tools/playtest.mjs --quick",
+    "test:dist": "node tools/build.js && node tools/playtest.mjs --dist",
+    "test:artifact": "node tools/build.js && node tools/playtest.mjs --artifact",
+    "test:endurance": "node tools/endurance.mjs 8 26",
+    "balance": "node tools/balance.mjs 1",
+    "shots": "node tools/visual.mjs",
+    "check": "node tools/check.mjs"
   },
   "keywords": ["game", "3d", "webgl", "three.js", "roguelite", "browser"],
   "license": "MIT",

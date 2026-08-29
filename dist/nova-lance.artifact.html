@@ -251,6 +251,13 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;background:var(--cyan
 .card .desc{font-size:13.5px;line-height:1.5;color:var(--ink-dim);flex:1;}
 .card .stack{font-size:11px;letter-spacing:.16em;color:var(--amber);text-transform:uppercase;}
 .card .keyhint{position:absolute;bottom:12px;right:16px;font-size:11px;color:var(--ink-dim);letter-spacing:.14em;}
+.refit-build{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;max-width:min(900px,92vw);}
+.refit-build:empty{display:none;}
+.refit-build span{
+  font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-dim);
+  padding:4px 9px;border:1px solid var(--line-soft);background:rgba(9,14,28,.5);
+}
+.refit-build b{font-weight:600;}
 .refit-foot{display:flex;align-items:center;gap:16px;color:var(--ink-dim);font-size:12px;letter-spacing:.2em;text-transform:uppercase;}
 
 /* ---------- results ---------- */
@@ -627,6 +634,7 @@ body.no-flash #damage-flash,body.no-flash #overdrive-tint{display:none;}
         <p id="refit-sub">Wave 1 cleared — install one module</p>
       </div>
       <div class="cards" id="upgrade-cards"></div>
+      <div class="refit-build" id="refit-build"></div>
       <div class="refit-foot"><span id="refit-timer">Deploying in 12</span><button class="btn ghost small" data-action="reroll" id="reroll-btn">REROLL (1)</button></div>
     </div>
   </div>
@@ -8142,7 +8150,7 @@ class WaveDirector {
     const g = this.game;
     const kind = this.bossKindFor(this.wave);
     const cycle = Math.max(0, Math.floor((this.wave - 1) / 15));
-    g.boss.spawn(kind, 1 + cycle * 0.85 + (this.wave > 15 ? (this.wave - 15) * 0.05 : 0));
+    g.boss.spawn(kind, 1 + cycle * 0.7 + (this.wave > 15 ? (this.wave - 15) * 0.035 : 0));
   }
 
   _clear() {
@@ -8202,7 +8210,7 @@ class UI {
       'module-strip', 'crosshair', 'indicators', 'floaters', 'banner', 'toast-stack', 'perf',
       'damage-flash', 'overdrive-tint', 'ship-cards', 'difficulty-seg', 'difficulty-hint',
       'mode-seg', 'mode-hint', 'opt-list', 'keylist', 'codex', 'stat-grid', 'unlock-list',
-      'upgrade-cards', 'refit-sub', 'refit-timer', 'reroll-btn', 'pause-stats', 'result-rank',
+      'upgrade-cards', 'refit-sub', 'refit-timer', 'reroll-btn', 'refit-build', 'pause-stats', 'result-rank',
       'result-title', 'result-sub', 'result-stats', 'result-modules', 'menu-best', 'menu-tip',
       'menu-records-sub', 'menu-launch-sub', 'touch-controls', 'stick-move', 'stick-aim',
       'tbtn-dash', 'tbtn-pulse', 'tbtn-over', 'tbtn-pause',
@@ -8531,6 +8539,15 @@ class UI {
     this.el['reroll-btn'].textContent = `REROLL (${rerolls})`;
     this.el['reroll-btn'].disabled = rerolls <= 0;
 
+    const installed = [...this.game.player.modules.entries()];
+    this.el['refit-build'].innerHTML = installed.length
+      ? installed.map(([id, n]) => {
+        const m = MODULES[id];
+        const c = RARITY_INFO[m.rarity].color;
+        return `<span style="border-color:${c}44"><b style="color:${c}">${m.name}</b>${n > 1 ? ` ×${n}` : ''}</span>`;
+      }).join('')
+      : '';
+
     offers.forEach((mod, i) => {
       const owned = this.game.player.modules.get(mod.id) || 0;
       const info = moduleLabel(mod, owned);
@@ -8602,7 +8619,8 @@ class UI {
       return `<span style="border-color:${RARITY_INFO[m.rarity].color}55;color:${RARITY_INFO[m.rarity].color}">${m.name}${n > 1 ? ` ×${n}` : ''}</span>`;
     });
     const unlockLines = (summary.unlocked || []).map((u) => `<span style="border-color:#7dff9e;color:#7dff9e">UNLOCKED — ${u}</span>`);
-    this.el['result-modules'].innerHTML = unlockLines.concat(mods).join('');
+    const seed = `<span title="Run seed — the same seed replays the same wave order">SEED ${summary.seed}</span>`;
+    this.el['result-modules'].innerHTML = unlockLines.concat(mods).concat([seed]).join('');
     this.show('results');
   }
 
@@ -8776,6 +8794,10 @@ class UI {
   floatText(worldPos, text, cls = '') {
     if (!this.game.save.settings.damageNumbers && (cls === '' || cls === 'crit')) return;
     const g = this.game;
+    // Hard cap: animation callbacks and timers can stall (throttled tab, a very
+    // low frame rate), and unbounded floaters would then pile up in the DOM.
+    const host = this.el.floaters;
+    while (host.childElementCount >= 44) host.removeChild(host.firstChild);
     const p = g.camera.worldToScreen(worldPos.x, (worldPos.y || 1) + 1.4, worldPos.z, g.width, g.height);
     if (p.behind) return;
     const el = this.floatPool.pop() || document.createElement('div');
@@ -8783,7 +8805,7 @@ class UI {
     el.textContent = text;
     el.style.left = `${p.x}px`;
     el.style.top = `${p.y}px`;
-    this.el.floaters.appendChild(el);
+    host.appendChild(el);
     const done = () => {
       el.removeEventListener('animationend', done);
       if (el.parentNode) el.parentNode.removeChild(el);

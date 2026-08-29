@@ -319,7 +319,7 @@ export class WaveDirector {
     const g = this.game;
     const kind = this.bossKindFor(this.wave);
     const cycle = Math.max(0, Math.floor((this.wave - 1) / 15));
-    g.boss.spawn(kind, 1 + cycle * 0.85 + (this.wave > 15 ? (this.wave - 15) * 0.05 : 0));
+    g.boss.spawn(kind, 1 + cycle * 0.7 + (this.wave > 15 ? (this.wave - 15) * 0.035 : 0));
   }
 
   _clear() {

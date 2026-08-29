@@ -249,6 +249,13 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;background:var(--cyan
 .card .desc{font-size:13.5px;line-height:1.5;color:var(--ink-dim);flex:1;}
 .card .stack{font-size:11px;letter-spacing:.16em;color:var(--amber);text-transform:uppercase;}
 .card .keyhint{position:absolute;bottom:12px;right:16px;font-size:11px;color:var(--ink-dim);letter-spacing:.14em;}
+.refit-build{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;max-width:min(900px,92vw);}
+.refit-build:empty{display:none;}
+.refit-build span{
+  font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-dim);
+  padding:4px 9px;border:1px solid var(--line-soft);background:rgba(9,14,28,.5);
+}
+.refit-build b{font-weight:600;}
 .refit-foot{display:flex;align-items:center;gap:16px;color:var(--ink-dim);font-size:12px;letter-spacing:.2em;text-transform:uppercase;}
 
 /* ---------- results ---------- */

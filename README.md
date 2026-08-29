@@ -24,7 +24,10 @@ HTTP, not `file://`).
 
 ```bash
 npm run build      # regenerate dist/nova-lance.html
-npm test           # 52-check automated playtest in headless Chromium
+npm test           # 70-check automated playtest in headless Chromium
+npm run test:artifact   # same suite against the host-wrapped build
+npm run test:endurance  # long soak + deep Endless run
+npm run balance         # scripted bot campaigns at every difficulty
 ```
 
 ## Controls
@@ -42,7 +45,9 @@ npm test           # 52-check automated playtest in headless Chromium
 | `F1` | Performance readout |
 
 Keyboard + mouse, gamepad (twin-stick with rumble) and touch (on-screen sticks)
-are all first-class; the game switches between them automatically.
+are all first-class; the game switches between them automatically. Stick and
+touch aiming get a modest magnetic assist inside a 17° cone — mouse aiming is
+left alone, because it does not need help and stealing precision feels bad.
 
 ## The loop
 
@@ -126,7 +131,8 @@ src/
 tools/
   serve.js            zero-dep dev server
   build.js            zero-dep bundler -> dist/nova-lance.html
-  playtest.mjs        automated QA suite (52 checks)
+  playtest.mjs        automated QA suite (70 checks)
+  endurance.mjs       long soak + deep Endless run (leak/drift detection)
   balance.mjs         scripted bot campaigns for tuning
   visual.mjs          staged scene capture for art review
   check.mjs           syntax check across all modules
@@ -145,6 +151,10 @@ A frame at wave 15 with a boss on screen costs **~56 draw calls**, and the
 simulation runs in well under a millisecond of CPU. Quality auto-tunes down a
 tier if the 90th-percentile frame time stays over budget.
 
+Twelve simulated minutes of continuous heavy combat (`npm run test:endurance`)
+move nothing: geometries, textures, scene-graph size, DOM node count and JS
+heap all plateau early and stay flat.
+
 ## Testing
 
 `npm test` boots the real game in headless Chromium and drives it through the
@@ -157,8 +167,12 @@ same input path a human uses:
 - pause/resume spam, death → results, boss kill → victory
 - **a complete 15-wave campaign played end to end by a bot**
 - resource-leak checks across 12 restarts (geometries, textures, DOM, scene graph)
+- touch end to end: real pointer drags on both sticks, taps on every action button
+- aim-assist cone behaviour
 - abuse passes: restart/dash/pulse/overdrive spam, wave 60, pickup floods,
   quality switching, viewport storms
+- resilience: corrupt save payload, storage denied, WebGL context loss and
+  restore, pool saturation, hostile delta times, a 320x480 viewport
 - audio: all 36 effects and the music scheduler
 - performance and draw-call budgets
 
@@ -174,7 +188,9 @@ wave-by-wave clear times, which is how the pacing above was tuned.
   Lancer occasionally clips a pillar corner during a charge (it stuns, which is
   the intended punish, but the collision reads as slightly abrupt).
 - Touch play works and is tested, but the arena is genuinely harder on a phone
-  than with a mouse; the camera does not compensate.
+  than with a mouse even with aim assist; the camera does not compensate.
+- Endless runs past roughly wave 25 lean on boss HP rather than new behaviour —
+  the encounters stop gaining mechanics after the third cycle.
 - Career progress lives in `localStorage`; private-mode browsers report this in
   Options and the run still plays normally.
 

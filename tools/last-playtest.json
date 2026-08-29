@@ -1,12 +1,12 @@
 {
-  "when": "2026-08-29T01:40:33.855Z",
+  "when": "2026-08-29T01:50:23.007Z",
   "passed": 70,
   "failed": 0,
   "results": [
     {
       "name": "game boots",
       "ok": true,
-      "detail": "1861ms"
+      "detail": "1784ms"
     },
     {
       "name": "no console errors on boot",
@@ -56,7 +56,7 @@
     {
       "name": "score accrues",
       "ok": true,
-      "detail": "score=214"
+      "detail": "score=199"
     },
     {
       "name": "wave 8 mixed composition runs clean",
@@ -66,7 +66,7 @@
     {
       "name": "enemy count stays bounded",
       "ok": true,
-      "detail": "max=13"
+      "detail": "max=14"
     },
     {
       "name": "projectiles stay bounded",
@@ -176,7 +176,7 @@
     {
       "name": "campaign reaches a conclusion",
       "ok": true,
-      "detail": "results after 508s"
+      "detail": "results after 447s"
     },
     {
       "name": "all 15 waves are reachable",
@@ -211,7 +211,7 @@
     {
       "name": "geometry count stable across 12 runs",
       "ok": true,
-      "detail": "39 → 39"
+      "detail": "36 → 36"
     },
     {
       "name": "texture count stable across 12 runs",
@@ -251,7 +251,7 @@
     {
       "name": "move stick drives the ship",
       "ok": true,
-      "detail": "dx=26.7 dz=0.0"
+      "detail": "dx=27.1 dz=0.0"
     },
     {
       "name": "aim stick fires the repeater",
@@ -316,7 +316,7 @@
     {
       "name": "respects pool caps",
       "ok": true,
-      "detail": "enemies=39 projectiles=22"
+      "detail": "enemies=36 projectiles=17"
     },
     {
       "name": "survives hostile delta times",
@@ -336,12 +336,12 @@
     {
       "name": "sim cost under 4ms/frame at wave 12",
       "ok": true,
-      "detail": "0.04ms"
+      "detail": "0.05ms"
     },
     {
       "name": "draw calls under 90",
       "ok": true,
-      "detail": "50"
+      "detail": "54"
     },
     {
       "name": "no console errors across the whole suite",
