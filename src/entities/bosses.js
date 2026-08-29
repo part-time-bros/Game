@@ -61,6 +61,8 @@ export class BossManager {
     });
     const mesh = new THREE.Mesh(spec.geometry, mat);
     mesh.frustumCulled = false;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
     const built = { spec, pose, mat, mesh, anim: new Animator(pose, spec.clips) };
     this._built[kind] = built;
     return built;

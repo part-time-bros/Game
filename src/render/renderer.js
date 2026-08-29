@@ -15,9 +15,9 @@ import { clamp, clamp01, RollingStat } from '../core/util.js';
 import { globalUniforms } from './materials.js';
 
 const QUALITY = {
-  low: { bloom: false, bloomLevels: 0, maxPixelRatio: 1.0, particleScale: 0.45, grain: 0.0, shadowBlobs: true },
-  medium: { bloom: true, bloomLevels: 1, maxPixelRatio: 1.35, particleScale: 0.75, grain: 0.02, shadowBlobs: true },
-  high: { bloom: true, bloomLevels: 2, maxPixelRatio: 2.0, particleScale: 1.0, grain: 0.03, shadowBlobs: true },
+  low: { bloom: false, bloomLevels: 0, maxPixelRatio: 1.0, particleScale: 0.45, grain: 0.0, shadowBlobs: true, shadowMap: 0, env: false },
+  medium: { bloom: true, bloomLevels: 1, maxPixelRatio: 1.35, particleScale: 0.75, grain: 0.02, shadowBlobs: true, shadowMap: 1024, env: true },
+  high: { bloom: true, bloomLevels: 2, maxPixelRatio: 2.0, particleScale: 1.0, grain: 0.03, shadowBlobs: true, shadowMap: 2048, env: true },
 };
 
 const FS_VERT = /* glsl */`
@@ -45,7 +45,9 @@ export class Renderer {
       // only for automated capture: keeps the backbuffer readable for screenshots
       preserveDrawingBuffer: typeof location !== 'undefined' && location.search.indexOf('capture') >= 0,
     });
-    this.renderer.setClearColor(0x03040c, 1);
+    this.renderer.setClearColor(0x1a1410, 1);
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.NoToneMapping;   // we tone map in the composite
     this.renderer.autoClear = true;
     this.renderer.info.autoReset = false;
@@ -386,12 +388,12 @@ export class Renderer {
         uBloom: { value: 0.42 },
         uUseBloom: { value: 1 },
         uUseBloom2: { value: 1 },
-        uExposure: { value: 1.0 },
+        uExposure: { value: 0.55 },
         uVignette: { value: 0.55 },
         uAberration: { value: 0.0 },
         uGrain: { value: 0.03 },
         uTime: { value: 0 },
-        uSaturation: { value: 0.94 },
+        uSaturation: { value: 1.0 },
         uFlashColor: { value: new THREE.Color(0, 0, 0) },
         uFlash: { value: 0 },
         uDesaturate: { value: 0 },
@@ -408,9 +410,43 @@ export class Renderer {
         uniform vec3 uFlashColor;
         varying vec2 vUv;
 
-        vec3 aces(vec3 x){
-          const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
-          return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+        // AgX. Desaturates as it clips rather than shifting hue, so a hot sky
+        // and a muzzle flash roll off to white instead of going pink.
+        vec3 agxDefaultContrastApprox(vec3 x){
+          vec3 x2 = x * x;
+          vec3 x4 = x2 * x2;
+          return  15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x
+                + 0.4298 * x2 + 0.1191 * x - 0.00232;
+        }
+        // "punchy" look: more contrast and saturation than AgX base
+        const vec3 AGX_SLOPE = vec3(1.0);
+        const float AGX_POWER = 1.16;
+        const float AGX_SAT = 1.12;
+
+        vec3 agx(vec3 col){
+          const mat3 agxIn = mat3(
+            0.842479062253094, 0.0423282422610123, 0.0423756549057051,
+            0.0784335999999992, 0.878468636469772, 0.0784336,
+            0.0792237451477643, 0.0791661274605434, 0.879142973793104);
+          const mat3 agxOut = mat3(
+             1.19687900512017, -0.0528968517574562, -0.0529716355144438,
+            -0.0980208811401368, 1.15190312990417, -0.0980434501171241,
+            -0.0990297440797205, -0.0989611768448433, 1.15107367264116);
+          const float minEv = -12.47393, maxEv = 4.026069;
+          col = agxIn * col;
+          col = clamp(log2(max(col, 1e-10)), minEv, maxEv);
+          col = (col - minEv) / (maxEv - minEv);
+          col = agxDefaultContrastApprox(col);
+
+          // The look transform. AgX's sigmoid alone is deliberately flat and
+          // desaturated — it is a base, not a finished image. Skipping this is
+          // exactly why the render came out milky.
+          float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
+          col = pow(max(col * AGX_SLOPE, 0.0), vec3(AGX_POWER));
+          col = luma + AGX_SAT * (col - luma);
+
+          col = agxOut * col;
+          return clamp(col, 0.0, 1.0);
         }
         vec3 toSRGB(vec3 c){
           return mix(c * 12.92, 1.055 * pow(max(c, vec3(0.0)), vec3(0.41666)) - 0.055, step(0.0031308, c));
@@ -454,7 +490,7 @@ export class Renderer {
           }
 
           col *= uExposure;
-          col = aces(col);
+          col = agx(col);
 
           // grade
           float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
@@ -462,7 +498,7 @@ export class Renderer {
           // Split tone: warm highlights, cool shadows. This is the single
           // cheapest thing that makes a render read as photographed rather
           // than as flat lit geometry.
-          col *= mix(vec3(0.84, 0.91, 1.08), vec3(1.09, 1.00, 0.87), smoothstep(0.0, 0.62, luma));
+          col *= mix(vec3(0.91, 0.95, 1.05), vec3(1.05, 1.00, 0.93), smoothstep(0.0, 0.62, luma));
           col = mix(col, vec3(luma), uDesaturate);
           col = mix(col, uFlashColor, uFlash);
 

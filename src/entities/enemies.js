@@ -98,6 +98,8 @@ export class Enemies {
         const mesh = new THREE.Mesh(spec.geometry, mat);
         mesh.visible = false;
         mesh.frustumCulled = true;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
         scene.add(mesh);
         return {
           mesh, mat, type: t, id: 0,

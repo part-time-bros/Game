@@ -2885,40 +2885,114 @@ const NOVA_FRAG = /* glsl */`
  * Pass `pose` (a rig Pose) to compile the skinned variant for this material.
  */
 function createNovaMaterial(opts = {}) {
-  const m = new THREE.ShaderMaterial({
-    vertexShader: NOVA_VERT,
-    fragmentShader: NOVA_FRAG,
-    defines: opts.pose ? { RIGGED: '', MAX_BONES } : {},
+  const u = {
+    uNoise: { value: noiseTexture() },
+    uTint: { value: new THREE.Color(opts.tint !== undefined ? opts.tint : 0xffffff) },
+    uFlashColor: { value: new THREE.Color(opts.flashColor !== undefined ? opts.flashColor : 0xffffff) },
+    uRimColor: { value: new THREE.Color(opts.rimColor !== undefined ? opts.rimColor : 0xffc98a) },
+    uDissolveColor: { value: new THREE.Color(opts.dissolveColor !== undefined ? opts.dissolveColor : 0xffb060) },
+    uFlash: { value: 0 },
+    uEmitScale: { value: opts.emitScale !== undefined ? opts.emitScale : 1 },
+    uOpacity: { value: opts.opacity !== undefined ? opts.opacity : 1 },
+    uRim: { value: opts.rim !== undefined ? opts.rim : 0.32 },
+    uDissolve: { value: 0 },
+    uDetail: { value: opts.detail !== undefined ? opts.detail : 1 },
+    uBones: { value: opts.pose ? opts.pose.uniform : null },
+  };
+
+  // `spec` used to drive a hand-rolled specular lobe; it now maps to PBR
+  // roughness, which is the same intent expressed in the units the BRDF wants.
+  const spec = opts.spec !== undefined ? opts.spec : 0.35;
+  const m = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: clamp(1.0 - spec * 0.85, 0.18, 1.0),
+    metalness: opts.metalness !== undefined ? opts.metalness : 0.06,
     transparent: !!opts.transparent,
+    opacity: opts.opacity !== undefined ? opts.opacity : 1,
     depthWrite: opts.depthWrite !== undefined ? opts.depthWrite : true,
     side: opts.side || THREE.FrontSide,
-    toneMapped: false,
-    uniforms: {
-      uOutput: globalUniforms.uOutput,
-      uTime: globalUniforms.uTime,
-      uLightDirView: globalUniforms.uLightDirView,
-      uUpView: globalUniforms.uUpView,
-      uLightColor: globalUniforms.uLightColor,
-      uSkyColor: globalUniforms.uSkyColor,
-      uGroundColor: globalUniforms.uGroundColor,
-      uFogColor: globalUniforms.uFogColor,
-      uFogNear: globalUniforms.uFogNear,
-      uFogFar: globalUniforms.uFogFar,
-      uNoise: { value: noiseTexture() },
-      uTint: { value: new THREE.Color(opts.tint !== undefined ? opts.tint : 0xffffff) },
-      uFlashColor: { value: new THREE.Color(opts.flashColor !== undefined ? opts.flashColor : 0xffffff) },
-      uRimColor: { value: new THREE.Color(opts.rimColor !== undefined ? opts.rimColor : 0xffc98a) },
-      uDissolveColor: { value: new THREE.Color(opts.dissolveColor !== undefined ? opts.dissolveColor : 0xffb060) },
-      uFlash: { value: 0 },
-      uEmitScale: { value: opts.emitScale !== undefined ? opts.emitScale : 1 },
-      uOpacity: { value: opts.opacity !== undefined ? opts.opacity : 1 },
-      uRim: { value: opts.rim !== undefined ? opts.rim : 0.32 },
-      uSpec: { value: opts.spec !== undefined ? opts.spec : 0.35 },
-      uFogAmount: { value: opts.fog !== undefined ? opts.fog : 1 },
-      uDissolve: { value: 0 },
-      uBones: { value: opts.pose ? opts.pose.uniform : null },
-    },
+    fog: true,
   });
+  m.defines = opts.pose ? { RIGGED: '', MAX_BONES } : {};
+  // Call sites mutate uniforms directly (mat.uniforms.uDissolve.value = ...).
+  // These are the same objects the compiled program binds, so the assignment
+  // still lands even though this is no longer a raw ShaderMaterial.
+  m.uniforms = u;
+
+  m.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, u);
+
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>
+        attribute vec3 aColor;
+        attribute float aEmit;
+        varying vec3 vNovaColor;
+        varying float vNovaEmit;
+        varying vec3 vNovaWorld;
+        #ifdef RIGGED
+          // Rigid bind: one bone per vertex, authored in that bone's local
+          // space, so the pose is a single matrix multiply and no inverse-bind.
+          attribute float aBone;
+          uniform mat4 uBones[MAX_BONES];
+        #endif`)
+      // Bone transform has to land before three's instancing and projection
+      // maths, which is exactly what these two chunks are for.
+      .replace('#include <beginnormal_vertex>', `
+        vec3 objectNormal = vec3(normal);
+        #ifdef RIGGED
+          objectNormal = mat3(uBones[int(aBone)]) * objectNormal;
+        #endif`)
+      .replace('#include <begin_vertex>', `
+        vec3 transformed = vec3(position);
+        #ifdef RIGGED
+          transformed = (uBones[int(aBone)] * vec4(transformed, 1.0)).xyz;
+        #endif
+        vNovaColor = aColor;
+        vNovaEmit = aEmit;
+        vNovaWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;`);
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>
+        varying vec3 vNovaColor;
+        varying float vNovaEmit;
+        varying vec3 vNovaWorld;
+        uniform vec3 uTint; uniform vec3 uFlashColor; uniform vec3 uRimColor;
+        uniform vec3 uDissolveColor;
+        uniform float uFlash; uniform float uEmitScale; uniform float uOpacity;
+        uniform float uRim; uniform float uDissolve; uniform float uDetail;
+        uniform sampler2D uNoise;`)
+      // Writing into diffuseColor rather than gl_FragColor is the whole point:
+      // everything downstream — shadows, IBL, the BRDF, fog, tone mapping —
+      // then applies to it for free. Writing gl_FragColor skipped all of it.
+      .replace('#include <map_fragment>', `
+        float novaDis = texture2D(uNoise, vNovaWorld.xz * 0.22 + vNovaWorld.y * 0.11).r;
+        float novaEdge = 0.0;
+        if (uDissolve > 0.001) {
+          float novaN2 = texture2D(uNoise, vNovaWorld.xz * 0.9 - vNovaWorld.y * 0.4).g;
+          float n = novaDis * 0.72 + novaN2 * 0.28;
+          if (n < uDissolve) discard;
+          novaEdge = smoothstep(uDissolve + 0.16, uDissolve, n);
+        }
+        // Triplanar break-up. Flat vertex colour on flat geometry is most of
+        // why untextured models read as plastic; this costs three taps and
+        // gives every face some grain that follows the surface.
+        float novaDxz = texture2D(uNoise, vNovaWorld.xz * 0.85).g;
+        float novaDxy = texture2D(uNoise, vNovaWorld.xy * 0.85).b;
+        float novaDzy = texture2D(uNoise, vNovaWorld.zy * 0.85).r;
+        float novaDet = mix(0.5, (novaDxz + novaDxy + novaDzy) / 3.0, uDetail);
+        diffuseColor.rgb *= vNovaColor * uTint * (0.80 + novaDet * 0.42);
+        diffuseColor.rgb = mix(diffuseColor.rgb, uFlashColor, uFlash);
+        diffuseColor.a *= uOpacity;`)
+      .replace('#include <roughnessmap_fragment>', `
+        float roughnessFactor = roughness * (0.82 + novaDet * 0.36);`)
+      .replace('#include <emissivemap_fragment>', `
+        totalEmissiveRadiance += vNovaColor * vNovaEmit * uEmitScale;
+        totalEmissiveRadiance += uDissolveColor * novaEdge * 3.0;
+        // a thin warm sun-wrap along silhouettes, on top of the real lighting
+        float novaFres = pow(1.0 - saturate(dot(normal, normalize(vViewPosition))), 5.0);
+        totalEmissiveRadiance += uRimColor * novaFres * uRim * 0.30;`);
+  };
+
   m.name = opts.name || 'nova';
   return m;
 }
@@ -2971,140 +3045,114 @@ function createEnergyMaterial(opts = {}) {
 
 /**
  * The canyon floor. Dry cracked earth: a cellular crack network over layered
- * fbm tone, with dust kicked up by impacts. No lattice, no seam glow — the
- * ground is lit, not emissive, which is most of what separates this from the
- * neon deck it replaced.
+ * fbm tone. Built on MeshStandardMaterial so it *receives the sun's shadow* —
+ * the ground is where cast shadows matter most, and a raw ShaderMaterial
+ * cannot receive them at all.
  */
 function createFloorMaterial() {
-  return new THREE.ShaderMaterial({
-    toneMapped: false,
-    transparent: false,
-    uniforms: {
-      uTime: globalUniforms.uTime,
-      uOutput: globalUniforms.uOutput,
-      uFogColor: globalUniforms.uFogColor,
-      uFogNear: globalUniforms.uFogNear,
-      uFogFar: globalUniforms.uFogFar,
-      uLightDirView: globalUniforms.uLightDirView,
-      uLightColor: globalUniforms.uLightColor,
-      uSkyColor: globalUniforms.uSkyColor,
-      uNoise: { value: noiseTexture() },
-      uBase: { value: new THREE.Color(0x8a6a46) },      // dry dirt
-      uSeam: { value: new THREE.Color(0x53402c) },      // crack shadow
-      uAccent: { value: new THREE.Color(0xc2a374) },    // pale sand drift
-      uDanger: { value: new THREE.Color(0x7a2b22) },    // blood-dark, rises with threat
-      uRadius: { value: 46 },
-      uRipples: { value: Array.from({ length: 8 }, () => new THREE.Vector4(0, 0, -99, 0)) },
-      uPlayerPos: { value: new THREE.Vector3() },
-      uThreat: { value: 0 },
-      uCoreGlow: { value: 0 },
-    },
-    vertexShader: /* glsl */`
-      varying vec3 vWorldPos;
-      varying float vDepth;
-      varying vec3 vNormal;
-      void main(){
-        vec4 world = modelMatrix * vec4(position, 1.0);
-        vWorldPos = world.xyz;
-        vec4 mv = viewMatrix * world;
-        vDepth = -mv.z;
-        vNormal = normalize(normalMatrix * normal);
-        gl_Position = projectionMatrix * mv;
-      }
-    `,
-    fragmentShader: /* glsl */`
-      precision highp float;
-      ${NOVA_OUT}
-      uniform float uTime; uniform float uRadius; uniform float uThreat; uniform float uCoreGlow;
-      uniform vec3 uBase; uniform vec3 uSeam; uniform vec3 uAccent; uniform vec3 uDanger;
-      uniform vec3 uFogColor; uniform vec3 uLightColor; uniform vec3 uSkyColor;
-      uniform vec3 uLightDirView;
-      uniform float uFogNear; uniform float uFogFar;
-      uniform vec4 uRipples[8];
-      uniform vec3 uPlayerPos;
-      uniform sampler2D uNoise;
-      varying vec3 vWorldPos; varying float vDepth; varying vec3 vNormal;
+  const u = {
+    uNoise: { value: noiseTexture() },
+    uBase: { value: new THREE.Color(0x6f5537) },      // dry dirt
+    uSeam: { value: new THREE.Color(0x3a2c1d) },      // crack shadow
+    uAccent: { value: new THREE.Color(0x9d8259) },    // pale sand drift
+    uDanger: { value: new THREE.Color(0x7a2b22) },    // blood-dark, rises with threat
+    uRadius: { value: 46 },
+    uRipples: { value: Array.from({ length: 8 }, () => new THREE.Vector4(0, 0, -99, 0)) },
+    uPlayerPos: { value: new THREE.Vector3() },
+    uThreat: { value: 0 },
+    uCoreGlow: { value: 0 },
+    uTime: globalUniforms.uTime,
+  };
 
-      vec2 hash22(vec2 p){
-        p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
-        return fract(sin(p) * 43758.5453);
-      }
+  const m = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.95, metalness: 0.0, fog: true });
+  m.uniforms = u;
 
-      /** Worley F2-F1: near zero along cell borders, which is where clay splits. */
-      float crackField(vec2 p){
-        vec2 n = floor(p), f = fract(p);
-        float f1 = 8.0, f2 = 8.0;
-        for (int j = -1; j <= 1; j++) {
-          for (int i = -1; i <= 1; i++) {
-            vec2 g = vec2(float(i), float(j));
-            float d = length(g + hash22(n + g) - f);
-            if (d < f1) { f2 = f1; f1 = d; } else if (d < f2) { f2 = d; }
-          }
+  m.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, u);
+
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>
+        varying vec3 vFloorWorld;`)
+      .replace('#include <begin_vertex>', `
+        vec3 transformed = vec3(position);
+        vFloorWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;`);
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>
+        varying vec3 vFloorWorld;
+        uniform float uTime; uniform float uRadius; uniform float uThreat; uniform float uCoreGlow;
+        uniform vec3 uBase; uniform vec3 uSeam; uniform vec3 uAccent; uniform vec3 uDanger;
+        uniform vec4 uRipples[8];
+        uniform vec3 uPlayerPos;
+        uniform sampler2D uNoise;
+
+        vec2 hash22(vec2 p){
+          p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+          return fract(sin(p) * 43758.5453);
         }
-        return f2 - f1;
-      }
 
-      void main(){
-        vec2 p = vWorldPos.xz;
-        float rad = length(p);
+        /** Worley F2-F1: near zero along cell borders, which is where clay splits. */
+        float crackField(vec2 p){
+          vec2 n = floor(p), f = fract(p);
+          float f1 = 8.0, f2 = 8.0;
+          for (int j = -1; j <= 1; j++) {
+            for (int i = -1; i <= 1; i++) {
+              vec2 g = vec2(float(i), float(j));
+              float d = length(g + hash22(n + g) - f);
+              if (d < f1) { f2 = f1; f1 = d; } else if (d < f2) { f2 = d; }
+            }
+          }
+          return f2 - f1;
+        }`)
+      .replace('#include <map_fragment>', `
+        vec2 fp = vFloorWorld.xz;
+        float frad = length(fp);
+        // Fine detail has no mips; shimmering crack lines near the horizon are
+        // the fastest way to look cheap, so it fades with distance.
+        float fdetail = 1.0 - smoothstep(22.0, 74.0, length(vViewPosition));
 
-        // Fine detail has no mips, and shimmering crack lines near the horizon
-        // are the fastest way to look cheap, so it fades with distance.
-        float detail = 1.0 - smoothstep(22.0, 74.0, vDepth);
+        float fgrain = texture2D(uNoise, fp * 0.045).r * 0.55 + texture2D(uNoise, fp * 0.21).g * 0.45;
+        float fdrift = texture2D(uNoise, fp * 0.012).b;
 
-        float grain = texture2D(uNoise, p * 0.045).r * 0.55 + texture2D(uNoise, p * 0.21).g * 0.45;
-        float drift = texture2D(uNoise, p * 0.012).b;   // 'patch' is a GLSL reserved word
+        // hairline splits in dried clay, roughly a hand's width apart
+        float fbig = 1.0 - smoothstep(0.0, 0.055, crackField(fp * 0.45));
+        float ffine = 1.0 - smoothstep(0.0, 0.085, crackField(fp * 1.35));
+        float fcrack = clamp(fbig * 0.85 + ffine * 0.5 * fdetail, 0.0, 1.0);
 
-        // Two crack scales. These are hairline splits in dried clay, roughly a
-        // hand's width apart — an earlier pass had cells six metres across,
-        // which read as paving slabs rather than ground.
-        float big = 1.0 - smoothstep(0.0, 0.055, crackField(p * 0.45));
-        float fine = 1.0 - smoothstep(0.0, 0.085, crackField(p * 1.35));
-        float crack = clamp(big * 0.85 + fine * 0.5 * detail, 0.0, 1.0);
-
-        // dirt tone: sun-bleached sand drifting over darker earth, in broad
-        // uneven blotches so no two stretches of ground look the same
-        vec3 albedo = mix(uBase, uAccent, smoothstep(0.34, 0.82, drift));
-        albedo = mix(albedo, uSeam, smoothstep(0.62, 0.16, drift) * 0.45);
-        albedo *= 0.70 + grain * 0.58;
-        albedo = mix(albedo, uSeam, crack * 0.34);
-        // blood-dark wash as the field gets dangerous, not a shift to magenta
-        albedo = mix(albedo, uDanger, uThreat * 0.16);
-
-        // lit, not emissive: flat key + sky fill, with the cracks self-shadowing
-        vec3 N = normalize(vNormal);
-        float ndl = max(dot(N, uLightDirView), 0.0);
-        float ao = 1.0 - crack * 0.26;
-        vec3 col = albedo * (uSkyColor * 0.85 * ao + uLightColor * (0.28 + ndl * 0.72) * ao);
+        vec3 falbedo = mix(uBase, uAccent, smoothstep(0.34, 0.82, fdrift));
+        falbedo = mix(falbedo, uSeam, smoothstep(0.62, 0.16, fdrift) * 0.45);
+        falbedo *= 0.74 + fgrain * 0.34;
+        falbedo = mix(falbedo, uSeam, fcrack * 0.46);
+        falbedo = mix(falbedo, uDanger, uThreat * 0.16);
 
         // dust kicked up by impacts
-        float ripple = 0.0;
+        float fripple = 0.0;
         for (int i = 0; i < 8; i++) {
           vec4 R = uRipples[i];
           float age = uTime - R.z;
           if (age < 0.0 || age > 1.7) continue;
-          float d = distance(p, R.xy);
+          float d = distance(fp, R.xy);
           float r = age * 26.0;
-          ripple += exp(-abs(d - r) * 0.55) * (1.0 - age / 1.7) * R.w;
+          fripple += exp(-abs(d - r) * 0.55) * (1.0 - age / 1.7) * R.w;
         }
-        col = mix(col, uAccent * 1.05, clamp(ripple * 0.45, 0.0, 0.65));
+        falbedo = mix(falbedo, uAccent * 1.05, clamp(fripple * 0.45, 0.0, 0.65));
 
-        // a soft pool of light around the rider keeps them readable on open ground
-        float pd = distance(p, uPlayerPos.xz);
-        col += uLightColor * 0.030 * exp(-pd * 0.16);
-        col += uAccent * uCoreGlow * 0.05 * exp(-rad * 0.09);
+        // arena-scale occlusion: the ground darkens toward the canyon wall
+        float fedge = smoothstep(uRadius - 22.0, uRadius, frad);
+        falbedo *= 1.0 - fedge * 0.55;
 
-        // the ground darkens toward the canyon wall: ambient occlusion at the
-        // scale of the whole arena, and it stops the floor reading as a disc
-        float edge = smoothstep(uRadius - 22.0, uRadius, rad);
-        col *= 1.0 - edge * 0.62;
+        diffuseColor.rgb *= falbedo;`)
+      // cracks read as damp/rough, drifted sand as smoother
+      .replace('#include <roughnessmap_fragment>', `
+        float roughnessFactor = roughness * (0.86 + fcrack * 0.14) - fdrift * 0.10;`)
+      .replace('#include <emissivemap_fragment>', `
+        totalEmissiveRadiance += uAccent * uCoreGlow * 0.04 * exp(-frad * 0.09);
+        // the cracks self-shadow: cheap contact darkening the shadow map is
+        // far too coarse to resolve
+        diffuseColor.rgb *= 1.0 - fcrack * 0.26;`);
+  };
 
-        float fog = smoothstep(uFogNear, uFogFar, vDepth);
-        col = mix(col, uFogColor, fog * 0.92);
-        gl_FragColor = vec4(novaOut(col), 1.0);
-      }
-    `,
-  });
+  return m;
 }
 
 /** Inverted sphere carrying the baked nebula. */
@@ -3309,11 +3357,11 @@ const PALETTE = {
   sand: 0xc2a374,
   dirt: 0x8a6a46,
   dirtDark: 0x53402c,
-  clay: 0xa8763f,
-  rockRed: 0xa35a38,
-  rockDark: 0x6b3a26,
-  rockLite: 0xc98a5e,
-  strata: 0x8f5535,
+  clay: 0x9c7d55,
+  rockRed: 0x94604a,
+  rockDark: 0x5f4436,
+  rockLite: 0xbd9a78,
+  strata: 0x856049,
   sage: 0x6e7a5e,
   scrub: 0x4e5a3e,
   timber: 0x6b4e33,
@@ -4757,9 +4805,9 @@ const RIGGED_BOSSES = {
  */
 
 const QUALITY = {
-  low: { bloom: false, bloomLevels: 0, maxPixelRatio: 1.0, particleScale: 0.45, grain: 0.0, shadowBlobs: true },
-  medium: { bloom: true, bloomLevels: 1, maxPixelRatio: 1.35, particleScale: 0.75, grain: 0.02, shadowBlobs: true },
-  high: { bloom: true, bloomLevels: 2, maxPixelRatio: 2.0, particleScale: 1.0, grain: 0.03, shadowBlobs: true },
+  low: { bloom: false, bloomLevels: 0, maxPixelRatio: 1.0, particleScale: 0.45, grain: 0.0, shadowBlobs: true, shadowMap: 0, env: false },
+  medium: { bloom: true, bloomLevels: 1, maxPixelRatio: 1.35, particleScale: 0.75, grain: 0.02, shadowBlobs: true, shadowMap: 1024, env: true },
+  high: { bloom: true, bloomLevels: 2, maxPixelRatio: 2.0, particleScale: 1.0, grain: 0.03, shadowBlobs: true, shadowMap: 2048, env: true },
 };
 
 const FS_VERT = /* glsl */`
@@ -4787,7 +4835,9 @@ class Renderer {
       // only for automated capture: keeps the backbuffer readable for screenshots
       preserveDrawingBuffer: typeof location !== 'undefined' && location.search.indexOf('capture') >= 0,
     });
-    this.renderer.setClearColor(0x03040c, 1);
+    this.renderer.setClearColor(0x1a1410, 1);
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.NoToneMapping;   // we tone map in the composite
     this.renderer.autoClear = true;
     this.renderer.info.autoReset = false;
@@ -5128,12 +5178,12 @@ class Renderer {
         uBloom: { value: 0.42 },
         uUseBloom: { value: 1 },
         uUseBloom2: { value: 1 },
-        uExposure: { value: 1.0 },
+        uExposure: { value: 0.55 },
         uVignette: { value: 0.55 },
         uAberration: { value: 0.0 },
         uGrain: { value: 0.03 },
         uTime: { value: 0 },
-        uSaturation: { value: 0.94 },
+        uSaturation: { value: 1.0 },
         uFlashColor: { value: new THREE.Color(0, 0, 0) },
         uFlash: { value: 0 },
         uDesaturate: { value: 0 },
@@ -5150,9 +5200,43 @@ class Renderer {
         uniform vec3 uFlashColor;
         varying vec2 vUv;
 
-        vec3 aces(vec3 x){
-          const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
-          return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+        // AgX. Desaturates as it clips rather than shifting hue, so a hot sky
+        // and a muzzle flash roll off to white instead of going pink.
+        vec3 agxDefaultContrastApprox(vec3 x){
+          vec3 x2 = x * x;
+          vec3 x4 = x2 * x2;
+          return  15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x
+                + 0.4298 * x2 + 0.1191 * x - 0.00232;
+        }
+        // "punchy" look: more contrast and saturation than AgX base
+        const vec3 AGX_SLOPE = vec3(1.0);
+        const float AGX_POWER = 1.16;
+        const float AGX_SAT = 1.12;
+
+        vec3 agx(vec3 col){
+          const mat3 agxIn = mat3(
+            0.842479062253094, 0.0423282422610123, 0.0423756549057051,
+            0.0784335999999992, 0.878468636469772, 0.0784336,
+            0.0792237451477643, 0.0791661274605434, 0.879142973793104);
+          const mat3 agxOut = mat3(
+             1.19687900512017, -0.0528968517574562, -0.0529716355144438,
+            -0.0980208811401368, 1.15190312990417, -0.0980434501171241,
+            -0.0990297440797205, -0.0989611768448433, 1.15107367264116);
+          const float minEv = -12.47393, maxEv = 4.026069;
+          col = agxIn * col;
+          col = clamp(log2(max(col, 1e-10)), minEv, maxEv);
+          col = (col - minEv) / (maxEv - minEv);
+          col = agxDefaultContrastApprox(col);
+
+          // The look transform. AgX's sigmoid alone is deliberately flat and
+          // desaturated — it is a base, not a finished image. Skipping this is
+          // exactly why the render came out milky.
+          float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
+          col = pow(max(col * AGX_SLOPE, 0.0), vec3(AGX_POWER));
+          col = luma + AGX_SAT * (col - luma);
+
+          col = agxOut * col;
+          return clamp(col, 0.0, 1.0);
         }
         vec3 toSRGB(vec3 c){
           return mix(c * 12.92, 1.055 * pow(max(c, vec3(0.0)), vec3(0.41666)) - 0.055, step(0.0031308, c));
@@ -5196,7 +5280,7 @@ class Renderer {
           }
 
           col *= uExposure;
-          col = aces(col);
+          col = agx(col);
 
           // grade
           float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
@@ -5204,7 +5288,7 @@ class Renderer {
           // Split tone: warm highlights, cool shadows. This is the single
           // cheapest thing that makes a render read as photographed rather
           // than as flat lit geometry.
-          col *= mix(vec3(0.84, 0.91, 1.08), vec3(1.09, 1.00, 0.87), smoothstep(0.0, 0.62, luma));
+          col *= mix(vec3(0.91, 0.95, 1.05), vec3(1.05, 1.00, 0.93), smoothstep(0.0, 0.62, luma));
           col = mix(col, vec3(luma), uDesaturate);
           col = mix(col, uFlashColor, uFlash);
 
@@ -6414,12 +6498,44 @@ class World {
     this.sky.renderOrder = -10;
     scene.add(this.sky);
 
+    // ---------- sun ----------
+    // A real light, not a direction uniform. This is what buys cast shadows,
+    // and cast shadows are most of what "golden hour" means.
+    this.sun = new THREE.DirectionalLight(0xffd2a1, 1.95);
+    this.sun.position.set(-58, 30, -24);
+    this.sun.target.position.set(0, 0, 0);
+    this.sun.castShadow = true;
+    const sc = this.sun.shadow;
+    sc.mapSize.set(2048, 2048);
+    // One cascade sized to the arena: the whole playfield is 46 across, so a
+    // 64-unit ortho box covers it without the resolution loss of a big frustum.
+    sc.camera.left = -64; sc.camera.right = 64;
+    sc.camera.top = 64; sc.camera.bottom = -64;
+    sc.camera.near = 1; sc.camera.far = 190;
+    sc.bias = -0.0008;
+    sc.normalBias = 0.06;
+    scene.add(this.sun);
+    scene.add(this.sun.target);
+
+    // Warm bounce from the ground, cool sky from above. The environment map
+    // does most of the ambient work, but this keeps shadowed sides from going
+    // flat when the tier drops and IBL is off.
+    // Deliberately weak. Ambient is what kills contrast: with the environment
+    // map carrying the sky, this only needs to stop shadowed sides going black.
+    this.bounce = new THREE.HemisphereLight(0x9fb4d6, 0x8a6242, 0.18);
+    scene.add(this.bounce);
+
+    // Distance haze. The materials are three's standard now, so fog has to be
+    // on the scene — `fog: true` on a material does nothing without it.
+    this.fog = new THREE.Fog(0x8a6a4c, 105, 330);
+    scene.fog = this.fog;
+
     // ---------- deck ----------
     this.floorMat = createFloorMaterial();
     this.floorMat.uniforms.uRadius.value = this.radius;
     this.floor = new THREE.Mesh(new THREE.CircleGeometry(this.radius + 1.2, 128), this.floorMat);
     this.floor.rotation.x = -Math.PI / 2;
-    this.floor.receiveShadow = false;
+    this.floor.receiveShadow = true;
     scene.add(this.floor);
 
     // ---------- canyon rim ----------
@@ -6428,6 +6544,8 @@ class World {
     this.rimMat = createNovaMaterial({ rim: 0.30, spec: 0.06, rimColor: 0xffb877 });
     this.rim = new THREE.Mesh(this._buildRim(), this.rimMat);
     this.rim.frustumCulled = false;
+    this.rim.castShadow = true;
+    this.rim.receiveShadow = true;
     scene.add(this.rim);
 
     // ---------- water tower at the centre ----------
@@ -6439,6 +6557,7 @@ class World {
     this.towerTank.position.y = 7.3;
     this.towerVane = new THREE.Mesh(tower.vane, this.towerMat);
     this.towerVane.position.set(0, 13.4, -1.6);
+    for (const m of [this.towerFrame, this.towerTank, this.towerVane]) { m.castShadow = true; m.receiveShadow = true; }
     this.stabGroup.add(this.towerFrame, this.towerTank, this.towerVane);
     scene.add(this.stabGroup);
     this._stabGeos = [tower.frame, tower.tank, tower.vane];
@@ -6467,6 +6586,8 @@ class World {
       m.rotation.y = a * 1.7;
       const s = kind === 'spire' ? (i >= 6 ? 0.85 : 1) : 1;
       m.scale.setScalar(s);
+      m.castShadow = true;
+      m.receiveShadow = true;
       scene.add(m);
       this.pillars.push(m);
       // only rock blocks; you ride straight through a cactus or a dead tree
@@ -6685,6 +6806,30 @@ class World {
     return pts;
   }
 
+  /**
+   * Image-based lighting from the sky we already baked. Prefiltering the sky
+   * into a radiance map is the single biggest realism lever available here and
+   * it costs one texture — no HDR asset needed.
+   */
+  buildEnvironment(renderer) {
+    if (this._envRT) return;
+    try {
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      pmrem.compileEquirectangularShader();
+      const tex = skyTexture();
+      tex.mapping = THREE.EquirectangularReflectionMapping;
+      this._envRT = pmrem.fromEquirectangular(tex);
+      this.scene.environment = this._envRT.texture;
+      // An LDR sky prefilters to a flat, bright ambient; keep it low and let
+      // the sun do the work, or everything turns milky.
+      this.scene.environmentIntensity = 0.30;
+      pmrem.dispose();
+    } catch (e) {
+      // An env map is a quality win, never a requirement to run.
+      console.warn('[nova-lance] environment map unavailable:', e && e.message);
+    }
+  }
+
   /** Ping the deck shader with an impact ripple. */
   addRipple(x, z, strength = 1) {
     const arr = this.floorMat.uniforms.uRipples.value;
@@ -6736,6 +6881,7 @@ class World {
     this.motes.geometry.dispose(); this._moteMat.dispose();
     this._mistGeo.dispose();
     this._mistMats.forEach((m) => m.dispose());
+    if (this._envRT) { this._envRT.dispose(); this._envRT = null; }
   }
 }
 
@@ -7162,6 +7308,8 @@ class Enemies {
         const mesh = new THREE.Mesh(spec.geometry, mat);
         mesh.visible = false;
         mesh.frustumCulled = true;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
         scene.add(mesh);
         return {
           mesh, mat, type: t, id: 0,
@@ -8320,6 +8468,8 @@ class Player {
       const m = new THREE.Mesh(spec.geometry, mat);
       m.visible = false;
       m.frustumCulled = false;
+      m.castShadow = true;
+      m.receiveShadow = true;
       this.group.add(m);
       this.meshes[id] = { mesh: m, glow: spec.glow, pose, mat, animator: new Animator(pose, spec.clips) };
     }
@@ -9227,6 +9377,8 @@ class BossManager {
     });
     const mesh = new THREE.Mesh(spec.geometry, mat);
     mesh.frustumCulled = false;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
     const built = { spec, pose, mat, mesh, anim: new Animator(pose, spec.clips) };
     this._built[kind] = built;
     return built;
@@ -11362,7 +11514,9 @@ class Game {
     this._perfTimer = 0;
     this._aimWorld = new THREE.Vector3(0, 1.05, 0);
     this.aimScreen = { x: 0, y: 0 };
-    this._sunDir = new THREE.Vector3(0.45, 0.85, 0.35).normalize();
+    // must match World.sun's position, or the shaders that still take a
+    // direction uniform light from somewhere the shadows do not come from
+    this._sunDir = new THREE.Vector3(-58, 30, -24).normalize();
   }
 
   // ==================================================================
@@ -11501,12 +11655,33 @@ class Game {
     if (this.camera) {
       this.camera.enableLead = s.cameraRotate;
       const rig = this.camera.setStyle(s.cameraStyle);
+      this._applyRenderTier();
       // A low rig looks at the horizon, so the fog has to reach further out or
       // the far half of the deck turns into a grey wall.
       globalUniforms.uFogNear.value = rig.fogNear;
       globalUniforms.uFogFar.value = rig.fogFar;
+      if (this.world && this.world.fog) {
+        this.world.fog.near = rig.fogNear;
+        this.world.fog.far = rig.fogFar;
+      }
     }
     this.resize();
+  }
+
+  /** Shadow map size and IBL follow the quality tier; both are pure cost. */
+  _applyRenderTier() {
+    if (!this.world || !this.renderer) return;
+    const q = this.renderer.settings;
+    const sun = this.world.sun;
+    sun.castShadow = q.shadowMap > 0;
+    if (q.shadowMap > 0 && sun.shadow.mapSize.x !== q.shadowMap) {
+      sun.shadow.mapSize.set(q.shadowMap, q.shadowMap);
+      if (sun.shadow.map) { sun.shadow.map.dispose(); sun.shadow.map = null; }
+    }
+    if (q.env) this.world.buildEnvironment(this.renderer.renderer);
+    else this.scene.environment = null;
+    // Without IBL the hemisphere light has to carry the ambient on its own.
+    this.world.bounce.intensity = q.env ? 0.18 : 0.62;
   }
 
   setSetting(key, value) {
@@ -12231,8 +12406,8 @@ class Game {
     u.uFlash.value = flashes ? s.flash * 0.5 : 0;
     u.uFlashColor.value.copy(s.flashColor);
     u.uDesaturate.value = s.desaturate;
-    u.uSaturation.value = 0.94 + (this.player && this.player.overdriveActive > 0 ? 0.20 : 0);
-    u.uExposure.value = 1.0 + (this.player && this.player.overdriveActive > 0 ? 0.12 : 0);
+    u.uSaturation.value = 1.0 + (this.player && this.player.overdriveActive > 0 ? 0.20 : 0);
+    u.uExposure.value = 0.55 + (this.player && this.player.overdriveActive > 0 ? 0.09 : 0);
   }
 
   render() {

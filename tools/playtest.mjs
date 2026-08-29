@@ -1224,7 +1224,10 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
     console.log(`    sim ${perf.simMs.toFixed(2)}ms/frame · raster ${perf.renderMs.toFixed(1)}ms (software) · draws ${perf.info.calls} · tris ${(perf.info.triangles / 1000).toFixed(1)}k`);
     console.log(`    live: ${perf.enemies} enemies, ${perf.projectiles} projectiles, ${perf.particles} particles`);
     check('sim cost under 4ms/frame at wave 12', perf.simMs < 4, `${perf.simMs.toFixed(2)}ms`);
-    check('draw calls under 90', perf.info.calls < 90, `${perf.info.calls}`);
+    // The shadow pass draws every caster a second time, so the budget is not
+    // comparable to the pre-PBR pipeline's. 'low' turns shadows off entirely,
+    // which is what phones actually run.
+    check('draw calls under 150', perf.info.calls < 150, `${perf.info.calls} (includes the shadow pass)`);
     await shot(page, '15-gameplay-heavy');
   }
 

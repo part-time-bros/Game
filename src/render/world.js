@@ -6,7 +6,7 @@
  */
 import { TAU, clamp01, lerp, RNG } from '../core/util.js';
 import { createFloorMaterial, createSkyMaterial, createNovaMaterial } from './materials.js';
-import { noiseTexture } from './textures.js';
+import { noiseTexture, skyTexture } from './textures.js';
 import { MeshBuilder, PALETTE, buildRockSpire, buildDeadTree, buildCactus, buildWaterTower } from './models.js';
 
 export const ARENA_RADIUS = 46;
@@ -29,12 +29,44 @@ export class World {
     this.sky.renderOrder = -10;
     scene.add(this.sky);
 
+    // ---------- sun ----------
+    // A real light, not a direction uniform. This is what buys cast shadows,
+    // and cast shadows are most of what "golden hour" means.
+    this.sun = new THREE.DirectionalLight(0xffd2a1, 1.95);
+    this.sun.position.set(-58, 30, -24);
+    this.sun.target.position.set(0, 0, 0);
+    this.sun.castShadow = true;
+    const sc = this.sun.shadow;
+    sc.mapSize.set(2048, 2048);
+    // One cascade sized to the arena: the whole playfield is 46 across, so a
+    // 64-unit ortho box covers it without the resolution loss of a big frustum.
+    sc.camera.left = -64; sc.camera.right = 64;
+    sc.camera.top = 64; sc.camera.bottom = -64;
+    sc.camera.near = 1; sc.camera.far = 190;
+    sc.bias = -0.0008;
+    sc.normalBias = 0.06;
+    scene.add(this.sun);
+    scene.add(this.sun.target);
+
+    // Warm bounce from the ground, cool sky from above. The environment map
+    // does most of the ambient work, but this keeps shadowed sides from going
+    // flat when the tier drops and IBL is off.
+    // Deliberately weak. Ambient is what kills contrast: with the environment
+    // map carrying the sky, this only needs to stop shadowed sides going black.
+    this.bounce = new THREE.HemisphereLight(0x9fb4d6, 0x8a6242, 0.18);
+    scene.add(this.bounce);
+
+    // Distance haze. The materials are three's standard now, so fog has to be
+    // on the scene — `fog: true` on a material does nothing without it.
+    this.fog = new THREE.Fog(0x8a6a4c, 105, 330);
+    scene.fog = this.fog;
+
     // ---------- deck ----------
     this.floorMat = createFloorMaterial();
     this.floorMat.uniforms.uRadius.value = this.radius;
     this.floor = new THREE.Mesh(new THREE.CircleGeometry(this.radius + 1.2, 128), this.floorMat);
     this.floor.rotation.x = -Math.PI / 2;
-    this.floor.receiveShadow = false;
+    this.floor.receiveShadow = true;
     scene.add(this.floor);
 
     // ---------- canyon rim ----------
@@ -43,6 +75,8 @@ export class World {
     this.rimMat = createNovaMaterial({ rim: 0.30, spec: 0.06, rimColor: 0xffb877 });
     this.rim = new THREE.Mesh(this._buildRim(), this.rimMat);
     this.rim.frustumCulled = false;
+    this.rim.castShadow = true;
+    this.rim.receiveShadow = true;
     scene.add(this.rim);
 
     // ---------- water tower at the centre ----------
@@ -54,6 +88,7 @@ export class World {
     this.towerTank.position.y = 7.3;
     this.towerVane = new THREE.Mesh(tower.vane, this.towerMat);
     this.towerVane.position.set(0, 13.4, -1.6);
+    for (const m of [this.towerFrame, this.towerTank, this.towerVane]) { m.castShadow = true; m.receiveShadow = true; }
     this.stabGroup.add(this.towerFrame, this.towerTank, this.towerVane);
     scene.add(this.stabGroup);
     this._stabGeos = [tower.frame, tower.tank, tower.vane];
@@ -82,6 +117,8 @@ export class World {
       m.rotation.y = a * 1.7;
       const s = kind === 'spire' ? (i >= 6 ? 0.85 : 1) : 1;
       m.scale.setScalar(s);
+      m.castShadow = true;
+      m.receiveShadow = true;
       scene.add(m);
       this.pillars.push(m);
       // only rock blocks; you ride straight through a cactus or a dead tree
@@ -300,6 +337,30 @@ export class World {
     return pts;
   }
 
+  /**
+   * Image-based lighting from the sky we already baked. Prefiltering the sky
+   * into a radiance map is the single biggest realism lever available here and
+   * it costs one texture — no HDR asset needed.
+   */
+  buildEnvironment(renderer) {
+    if (this._envRT) return;
+    try {
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      pmrem.compileEquirectangularShader();
+      const tex = skyTexture();
+      tex.mapping = THREE.EquirectangularReflectionMapping;
+      this._envRT = pmrem.fromEquirectangular(tex);
+      this.scene.environment = this._envRT.texture;
+      // An LDR sky prefilters to a flat, bright ambient; keep it low and let
+      // the sun do the work, or everything turns milky.
+      this.scene.environmentIntensity = 0.30;
+      pmrem.dispose();
+    } catch (e) {
+      // An env map is a quality win, never a requirement to run.
+      console.warn('[nova-lance] environment map unavailable:', e && e.message);
+    }
+  }
+
   /** Ping the deck shader with an impact ripple. */
   addRipple(x, z, strength = 1) {
     const arr = this.floorMat.uniforms.uRipples.value;
@@ -351,5 +412,6 @@ export class World {
     this.motes.geometry.dispose(); this._moteMat.dispose();
     this._mistGeo.dispose();
     this._mistMats.forEach((m) => m.dispose());
+    if (this._envRT) { this._envRT.dispose(); this._envRT = null; }
   }
 }

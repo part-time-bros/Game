@@ -41,6 +41,8 @@ export class Player {
       const m = new THREE.Mesh(spec.geometry, mat);
       m.visible = false;
       m.frustumCulled = false;
+      m.castShadow = true;
+      m.receiveShadow = true;
       this.group.add(m);
       this.meshes[id] = { mesh: m, glow: spec.glow, pose, mat, animator: new Animator(pose, spec.clips) };
     }

@@ -64,7 +64,9 @@ export class Game {
     this._perfTimer = 0;
     this._aimWorld = new THREE.Vector3(0, 1.05, 0);
     this.aimScreen = { x: 0, y: 0 };
-    this._sunDir = new THREE.Vector3(0.45, 0.85, 0.35).normalize();
+    // must match World.sun's position, or the shaders that still take a
+    // direction uniform light from somewhere the shadows do not come from
+    this._sunDir = new THREE.Vector3(-58, 30, -24).normalize();
   }
 
   // ==================================================================
@@ -203,12 +205,33 @@ export class Game {
     if (this.camera) {
       this.camera.enableLead = s.cameraRotate;
       const rig = this.camera.setStyle(s.cameraStyle);
+      this._applyRenderTier();
       // A low rig looks at the horizon, so the fog has to reach further out or
       // the far half of the deck turns into a grey wall.
       globalUniforms.uFogNear.value = rig.fogNear;
       globalUniforms.uFogFar.value = rig.fogFar;
+      if (this.world && this.world.fog) {
+        this.world.fog.near = rig.fogNear;
+        this.world.fog.far = rig.fogFar;
+      }
     }
     this.resize();
+  }
+
+  /** Shadow map size and IBL follow the quality tier; both are pure cost. */
+  _applyRenderTier() {
+    if (!this.world || !this.renderer) return;
+    const q = this.renderer.settings;
+    const sun = this.world.sun;
+    sun.castShadow = q.shadowMap > 0;
+    if (q.shadowMap > 0 && sun.shadow.mapSize.x !== q.shadowMap) {
+      sun.shadow.mapSize.set(q.shadowMap, q.shadowMap);
+      if (sun.shadow.map) { sun.shadow.map.dispose(); sun.shadow.map = null; }
+    }
+    if (q.env) this.world.buildEnvironment(this.renderer.renderer);
+    else this.scene.environment = null;
+    // Without IBL the hemisphere light has to carry the ambient on its own.
+    this.world.bounce.intensity = q.env ? 0.18 : 0.62;
   }
 
   setSetting(key, value) {
@@ -933,8 +956,8 @@ export class Game {
     u.uFlash.value = flashes ? s.flash * 0.5 : 0;
     u.uFlashColor.value.copy(s.flashColor);
     u.uDesaturate.value = s.desaturate;
-    u.uSaturation.value = 0.94 + (this.player && this.player.overdriveActive > 0 ? 0.20 : 0);
-    u.uExposure.value = 1.0 + (this.player && this.player.overdriveActive > 0 ? 0.12 : 0);
+    u.uSaturation.value = 1.0 + (this.player && this.player.overdriveActive > 0 ? 0.20 : 0);
+    u.uExposure.value = 0.55 + (this.player && this.player.overdriveActive > 0 ? 0.09 : 0);
   }
 
   render() {
