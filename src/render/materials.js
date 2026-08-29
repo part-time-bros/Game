@@ -17,10 +17,13 @@ export const globalUniforms = {
   uTime: { value: 0 },
   uLightDirView: { value: new THREE.Vector3(0.4, 0.8, 0.45).normalize() },
   uUpView: { value: new THREE.Vector3(0, 1, 0) },
-  uLightColor: { value: new THREE.Color(1.0, 0.95, 0.92).multiplyScalar(1.15) },
-  uSkyColor: { value: new THREE.Color(0.18, 0.26, 0.46) },
-  uGroundColor: { value: new THREE.Color(0.05, 0.04, 0.10) },
-  uFogColor: { value: new THREE.Color(0.035, 0.045, 0.10) },
+  // Golden hour: a warm low key light, warm sky fill from above, and bounce
+  // off dry dirt from below. The old cold blue fill is what made everything
+  // read as neon-lit plastic.
+  uLightColor: { value: new THREE.Color(1.0, 0.80, 0.55).multiplyScalar(1.30) },
+  uSkyColor: { value: new THREE.Color(0.30, 0.28, 0.34) },
+  uGroundColor: { value: new THREE.Color(0.17, 0.12, 0.08) },
+  uFogColor: { value: new THREE.Color(0.52, 0.38, 0.26) },
   uFogNear: { value: 90 },
   uFogFar: { value: 260 },
   // 0 = write linear HDR for the composite pass to tone map (the normal path).
@@ -140,8 +143,10 @@ const NOVA_FRAG = /* glsl */`
     float spec = pow(max(dot(N, H), 0.0), 42.0) * uSpec;
     lit += uLightColor * spec;
 
-    float fres = pow(1.0 - max(dot(N, V), 0.0), 4.5);
-    lit += uRimColor * fres * uRim;
+    // A tight, dim rim reads as sun wrap on a dusty edge. The old wide bright
+    // one outlined every object in colour, which is most of what "neon" was.
+    float fres = pow(1.0 - max(dot(N, V), 0.0), 6.5);
+    lit += uRimColor * fres * uRim * 0.34;
 
     lit += base * vEmit * uEmitScale;
     lit += uDissolveColor * edgeGlow * 3.4;
@@ -182,8 +187,8 @@ export function createNovaMaterial(opts = {}) {
       uNoise: { value: noiseTexture() },
       uTint: { value: new THREE.Color(opts.tint !== undefined ? opts.tint : 0xffffff) },
       uFlashColor: { value: new THREE.Color(opts.flashColor !== undefined ? opts.flashColor : 0xffffff) },
-      uRimColor: { value: new THREE.Color(opts.rimColor !== undefined ? opts.rimColor : 0x53d9ff) },
-      uDissolveColor: { value: new THREE.Color(opts.dissolveColor !== undefined ? opts.dissolveColor : 0x8ce8ff) },
+      uRimColor: { value: new THREE.Color(opts.rimColor !== undefined ? opts.rimColor : 0xffc98a) },
+      uDissolveColor: { value: new THREE.Color(opts.dissolveColor !== undefined ? opts.dissolveColor : 0xffb060) },
       uFlash: { value: 0 },
       uEmitScale: { value: opts.emitScale !== undefined ? opts.emitScale : 1 },
       uOpacity: { value: opts.opacity !== undefined ? opts.opacity : 1 },
@@ -245,29 +250,33 @@ export function createEnergyMaterial(opts = {}) {
 }
 
 /**
- * The arena deck. A procedural hex lattice with travelling scan pulses and up
- * to eight live impact ripples — no textures, so it stays crisp at any zoom.
+ * The canyon floor. Dry cracked earth: a cellular crack network over layered
+ * fbm tone, with dust kicked up by impacts. No lattice, no seam glow — the
+ * ground is lit, not emissive, which is most of what separates this from the
+ * neon deck it replaced.
  */
 export function createFloorMaterial() {
   return new THREE.ShaderMaterial({
     toneMapped: false,
     transparent: false,
     uniforms: {
-      uOutput: globalUniforms.uOutput,
       uTime: globalUniforms.uTime,
+      uOutput: globalUniforms.uOutput,
       uFogColor: globalUniforms.uFogColor,
       uFogNear: globalUniforms.uFogNear,
       uFogFar: globalUniforms.uFogFar,
       uLightDirView: globalUniforms.uLightDirView,
+      uLightColor: globalUniforms.uLightColor,
+      uSkyColor: globalUniforms.uSkyColor,
       uNoise: { value: noiseTexture() },
-      uBase: { value: new THREE.Color(0x080d1c) },
-      uSeam: { value: new THREE.Color(0x2ad6ff) },
-      uAccent: { value: new THREE.Color(0xff3ea5) },
-      uDanger: { value: new THREE.Color(0x8b3fd0) },
+      uBase: { value: new THREE.Color(0x8a6a46) },      // dry dirt
+      uSeam: { value: new THREE.Color(0x53402c) },      // crack shadow
+      uAccent: { value: new THREE.Color(0xc2a374) },    // pale sand drift
+      uDanger: { value: new THREE.Color(0x7a2b22) },    // blood-dark, rises with threat
       uRadius: { value: 46 },
       uRipples: { value: Array.from({ length: 8 }, () => new THREE.Vector4(0, 0, -99, 0)) },
       uPlayerPos: { value: new THREE.Vector3() },
-      uThreat: { value: 0 },     // rises with danger — pushes the deck toward magenta
+      uThreat: { value: 0 },
       uCoreGlow: { value: 0 },
     },
     vertexShader: /* glsl */`
@@ -285,87 +294,93 @@ export function createFloorMaterial() {
     `,
     fragmentShader: /* glsl */`
       precision highp float;
-  ${NOVA_OUT}
+      ${NOVA_OUT}
       uniform float uTime; uniform float uRadius; uniform float uThreat; uniform float uCoreGlow;
-      uniform vec3 uBase; uniform vec3 uSeam; uniform vec3 uAccent; uniform vec3 uDanger; uniform vec3 uFogColor;
+      uniform vec3 uBase; uniform vec3 uSeam; uniform vec3 uAccent; uniform vec3 uDanger;
+      uniform vec3 uFogColor; uniform vec3 uLightColor; uniform vec3 uSkyColor;
+      uniform vec3 uLightDirView;
       uniform float uFogNear; uniform float uFogFar;
       uniform vec4 uRipples[8];
       uniform vec3 uPlayerPos;
       uniform sampler2D uNoise;
       varying vec3 vWorldPos; varying float vDepth; varying vec3 vNormal;
 
-      const vec2 S = vec2(1.7320508, 1.0);
-      float hexDist(vec2 p){ p = abs(p); return max(dot(p, S * 0.5), p.y); }
-      vec4 hexCell(vec2 p){
-        vec4 hC = floor(vec4(p, p - vec2(0.8660254, 0.5)) / S.xyxy) + 0.5;
-        vec4 h = vec4(p - hC.xy * S, p - (hC.zw + 0.5) * S);
-        return dot(h.xy, h.xy) < dot(h.zw, h.zw) ? vec4(h.xy, hC.xy) : vec4(h.zw, hC.zw + 0.5);
+      vec2 hash22(vec2 p){
+        p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+        return fract(sin(p) * 43758.5453);
       }
-      float hash21(vec2 p){ return fract(sin(dot(p, vec2(27.619, 57.583))) * 43758.5453); }
+
+      /** Worley F2-F1: near zero along cell borders, which is where clay splits. */
+      float crackField(vec2 p){
+        vec2 n = floor(p), f = fract(p);
+        float f1 = 8.0, f2 = 8.0;
+        for (int j = -1; j <= 1; j++) {
+          for (int i = -1; i <= 1; i++) {
+            vec2 g = vec2(float(i), float(j));
+            float d = length(g + hash22(n + g) - f);
+            if (d < f1) { f2 = f1; f1 = d; } else if (d < f2) { f2 = d; }
+          }
+        }
+        return f2 - f1;
+      }
 
       void main(){
         vec2 p = vWorldPos.xz;
         float rad = length(p);
-        float t = uTime;
 
-        // two-tier lattice: big structural plates over a fine deck weave
-        vec4 plate = hexCell(p * 0.085);
-        float plateEdge = hexDist(plate.xy);
-        float plateSeam = smoothstep(0.435, 0.495, plateEdge);
-        float plateRand = hash21(plate.zw);
+        // Fine detail has no mips, and shimmering crack lines near the horizon
+        // are the fastest way to look cheap, so it fades with distance.
+        float detail = 1.0 - smoothstep(22.0, 74.0, vDepth);
 
-        vec4 hc = hexCell(p * 0.42);
-        float e = hexDist(hc.xy);
-        float seam = smoothstep(0.450, 0.498, e);
-        float cellRand = hash21(hc.zw);
+        float grain = texture2D(uNoise, p * 0.045).r * 0.55 + texture2D(uNoise, p * 0.21).g * 0.45;
+        float drift = texture2D(uNoise, p * 0.012).b;   // 'patch' is a GLSL reserved word
 
-        float grunge = texture2D(uNoise, p * 0.035).r * 0.55 + texture2D(uNoise, p * 0.15).g * 0.45;
-        vec3 col = uBase * (0.45 + grunge * 0.85);
-        col *= 0.84 + 0.16 * step(0.55, cellRand);
-        col *= 0.88 + 0.24 * plateRand;
+        // Two crack scales. These are hairline splits in dried clay, roughly a
+        // hand's width apart — an earlier pass had cells six metres across,
+        // which read as paving slabs rather than ground.
+        float big = 1.0 - smoothstep(0.0, 0.055, crackField(p * 0.45));
+        float fine = 1.0 - smoothstep(0.0, 0.085, crackField(p * 1.35));
+        float crack = clamp(big * 0.85 + fine * 0.5 * detail, 0.0, 1.0);
 
-        // scan pulse rolling out from the stabilizer
-        float scan = pow(sin(rad * 0.30 - t * 1.35) * 0.5 + 0.5, 14.0);
-        float breathe = 0.5 + 0.5 * sin(t * 0.7 + plateRand * 12.0);
+        // dirt tone: sun-bleached sand drifting over darker earth, in broad
+        // uneven blotches so no two stretches of ground look the same
+        vec3 albedo = mix(uBase, uAccent, smoothstep(0.34, 0.82, drift));
+        albedo = mix(albedo, uSeam, smoothstep(0.62, 0.16, drift) * 0.45);
+        albedo *= 0.70 + grain * 0.58;
+        albedo = mix(albedo, uSeam, crack * 0.34);
+        // blood-dark wash as the field gets dangerous, not a shift to magenta
+        albedo = mix(albedo, uDanger, uThreat * 0.16);
 
-        // danger tint is violet, not bullet-magenta, so hostile fire stays legible
-        vec3 seamCol = mix(uSeam, uDanger, uThreat * 0.72);
-        // fine detail fades with distance: procedural lines have no mips, and
-        // shimmering hex edges near the horizon are the fastest way to look cheap
-        float detailFade = 1.0 - smoothstep(26.0, 78.0, vDepth);
-        float fine = seam * (0.075 + breathe * 0.04 + scan * 0.20) * detailFade;
-        float heavy = plateSeam * (0.19 + breathe * 0.085 + scan * 0.42);
+        // lit, not emissive: flat key + sky fill, with the cracks self-shadowing
+        vec3 N = normalize(vNormal);
+        float ndl = max(dot(N, uLightDirView), 0.0);
+        float ao = 1.0 - crack * 0.26;
+        vec3 col = albedo * (uSkyColor * 0.85 * ao + uLightColor * (0.28 + ndl * 0.72) * ao);
 
-        // impact ripples ride the lattice
+        // dust kicked up by impacts
         float ripple = 0.0;
         for (int i = 0; i < 8; i++) {
           vec4 R = uRipples[i];
-          float age = t - R.z;
+          float age = uTime - R.z;
           if (age < 0.0 || age > 1.7) continue;
           float d = distance(p, R.xy);
           float r = age * 26.0;
           ripple += exp(-abs(d - r) * 0.55) * (1.0 - age / 1.7) * R.w;
         }
+        col = mix(col, uAccent * 1.05, clamp(ripple * 0.45, 0.0, 0.65));
 
-        col += seamCol * (fine + heavy + ripple * 0.9) * 1.35;
-        col += seamCol * ripple * 0.16;
-
-        // pilot proximity glow keeps the ship readable against the deck
+        // a soft pool of light around the rider keeps them readable on open ground
         float pd = distance(p, uPlayerPos.xz);
-        col += uSeam * 0.035 * exp(-pd * 0.20);
+        col += uLightColor * 0.030 * exp(-pd * 0.16);
+        col += uAccent * uCoreGlow * 0.05 * exp(-rad * 0.09);
 
-        // core well in the middle of the arena
-        float core = exp(-rad * 0.11);
-        col += mix(uSeam, vec3(1.0), 0.35) * core * (0.22 + uCoreGlow);
-
-        // rim treatment + falloff into the void
-        float edge = smoothstep(uRadius - 2.8, uRadius, rad);
-        col = mix(col, uAccent * 1.1, edge * 0.45);
-        float outside = smoothstep(uRadius, uRadius + 0.8, rad);
-        col *= (1.0 - outside * 0.85);
+        // the ground darkens toward the canyon wall: ambient occlusion at the
+        // scale of the whole arena, and it stops the floor reading as a disc
+        float edge = smoothstep(uRadius - 22.0, uRadius, rad);
+        col *= 1.0 - edge * 0.62;
 
         float fog = smoothstep(uFogNear, uFogFar, vDepth);
-        col = mix(col, uFogColor, fog * 0.9);
+        col = mix(col, uFogColor, fog * 0.92);
         gl_FragColor = vec4(novaOut(col), 1.0);
       }
     `,

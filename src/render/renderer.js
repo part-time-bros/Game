@@ -337,7 +337,9 @@ export class Renderer {
     this.quadScene.add(this.quad);
 
     this.brightMat = new THREE.ShaderMaterial({
-      uniforms: { tDiffuse: { value: null }, uThreshold: { value: 0.72 }, uSoft: { value: 0.45 } },
+      // Only real highlights bloom now — the sun, muzzle flash, fire. A low
+      // threshold made every lit surface glow, which is what read as neon.
+      uniforms: { tDiffuse: { value: null }, uThreshold: { value: 0.92 }, uSoft: { value: 0.35 } },
       vertexShader: FS_VERT,
       depthTest: false, depthWrite: false, toneMapped: false,
       fragmentShader: /* glsl */`
@@ -381,15 +383,15 @@ export class Renderer {
         tScene: { value: null },
         tBloom: { value: null },
         tBloom2: { value: null },
-        uBloom: { value: 0.85 },
+        uBloom: { value: 0.42 },
         uUseBloom: { value: 1 },
         uUseBloom2: { value: 1 },
         uExposure: { value: 1.0 },
-        uVignette: { value: 0.42 },
+        uVignette: { value: 0.55 },
         uAberration: { value: 0.0 },
         uGrain: { value: 0.03 },
         uTime: { value: 0 },
-        uSaturation: { value: 1.06 },
+        uSaturation: { value: 0.94 },
         uFlashColor: { value: new THREE.Color(0, 0, 0) },
         uFlash: { value: 0 },
         uDesaturate: { value: 0 },
@@ -457,6 +459,10 @@ export class Renderer {
           // grade
           float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
           col = mix(vec3(luma), col, uSaturation);
+          // Split tone: warm highlights, cool shadows. This is the single
+          // cheapest thing that makes a render read as photographed rather
+          // than as flat lit geometry.
+          col *= mix(vec3(0.84, 0.91, 1.08), vec3(1.09, 1.00, 0.87), smoothstep(0.0, 0.62, luma));
           col = mix(col, vec3(luma), uDesaturate);
           col = mix(col, uFlashColor, uFlash);
 

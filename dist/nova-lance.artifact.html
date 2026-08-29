@@ -2180,8 +2180,9 @@ function noiseTexture(size = 256) {
 }
 
 /**
- * Equirectangular deep-space backdrop: nebula fbm, dust lanes and three
- * star populations. Baked once so the sky costs nothing per frame.
+ * Equirectangular sky: a desert dusk. Warm low sun near the horizon, banded
+ * cloud lit from that side, indigo overhead, dust haze at the bottom. Baked
+ * once, so the sky costs nothing per frame.
  */
 function skyTexture(w = 2048, h = 1024) {
   return cached('sky', () => {
@@ -2191,58 +2192,74 @@ function skyTexture(w = 2048, h = 1024) {
     const c = canvas(w, h), ctx = c.getContext('2d');
     const img = ctx.createImageData(w, h);
     const d = img.data;
+
+    const SUN_U = 0.30;          // where the sun sits around the horizon
+    const SUN_V = 0.505;         // just below the horizon line: long shadows
+    const mix = (a, b, t) => a + (b - a) * t;
+
     for (let y = 0; y < h; y++) {
       const v = y / h;
-      // vertical gradient: violet zenith -> deep navy horizon -> near black nadir
-      const grad = Math.pow(1 - Math.abs(v - 0.42) * 1.8, 2);
+      // 0 at the horizon, 1 at the zenith
+      const up = clamp01((0.5 - v) * 2);
       for (let x = 0; x < w; x++) {
         const u = x / w;
-        // Sample the noise on a circle in u so the equirect map tiles
-        // seamlessly around the horizon — a straight u ramp leaves a hard edge.
+        // Sample noise on a circle in u so the map wraps without a seam.
         const ang = u * TAU;
         const cx = Math.cos(ang) * 2.6, cy = Math.sin(ang) * 2.6;
-        const cloud = fbm(noise, cx + 8, cy + 8 + v * 3.2, 5, 2.1, 0.55);
-        const cloud2 = fbm(noise2, cx * 1.7 + 21, cy * 1.7 + 15 + v * 5.1, 4, 2.0, 0.5);
-        const neb = Math.pow(clamp01(cloud * 1.35 - 0.28), 2.1);
-        const neb2 = Math.pow(clamp01(cloud2 * 1.2 - 0.42), 2.6);
-        let r = 5 + grad * 10 + neb * 92 + neb2 * 118;
-        let g = 6 + grad * 12 + neb * 34 + neb2 * 22;
-        let b = 14 + grad * 34 + neb * 138 + neb2 * 96;
+
+        // angular distance to the sun, wrapped
+        let du = Math.abs(u - SUN_U);
+        if (du > 0.5) du = 1 - du;
+        const dv = v - SUN_V;
+        const sunD = Math.sqrt(du * du * 4 + dv * dv * 3.2);
+
+        // sky gradient: warm at the horizon, indigo overhead
+        let r = mix(232, 38, Math.pow(up, 0.62));
+        let g = mix(150, 58, Math.pow(up, 0.55));
+        let b = mix(92, 104, Math.pow(up, 0.40));
+
+        // the sun's own glow, and a broad warm wash along the horizon
+        const glow = Math.exp(-sunD * 5.2);
+        const wash = Math.exp(-Math.abs(dv) * 7.0) * (0.35 + 0.65 * Math.exp(-du * 3.0));
+        r += glow * 210 + wash * 70;
+        g += glow * 150 + wash * 38;
+        b += glow * 72 + wash * 12;
+
+        if (v < 0.5) {
+          // cloud banding: stretched hard in v so it reads as layered strata
+          const cloud = fbm(noise, cx + 8, cy * 0.35 + up * 5.2 + 8, 5, 2.1, 0.55);
+          const cloud2 = fbm(noise2, cx * 1.7 + 21, cy * 0.5 + up * 8.0 + 15, 4, 2.0, 0.5);
+          const band = Math.pow(clamp01(cloud * 1.25 - 0.30), 1.7) * (1 - up * 0.55);
+          const wisp = Math.pow(clamp01(cloud2 * 1.1 - 0.44), 2.2) * (1 - up * 0.3);
+          // lit from the sun side, shadowed away from it
+          const lit = clamp01(0.25 + Math.exp(-du * 2.4) * 0.95);
+          r += band * mix(52, 235, lit) + wisp * mix(30, 150, lit);
+          g += band * mix(44, 158, lit) + wisp * mix(26, 96, lit);
+          b += band * mix(58, 104, lit) + wisp * mix(38, 82, lit);
+        } else {
+          // below the horizon: dust, darkening downward
+          const k = clamp01((v - 0.5) * 2.6);
+          r = mix(r, 74, k); g = mix(g, 54, k); b = mix(b, 38, k);
+        }
+
         const i = (y * w + x) * 4;
-        d[i] = r; d[i + 1] = g; d[i + 2] = b; d[i + 3] = 255;
+        d[i] = Math.min(255, r); d[i + 1] = Math.min(255, g); d[i + 2] = Math.min(255, b); d[i + 3] = 255;
       }
     }
     ctx.putImageData(img, 0, 0);
 
-    // star field — density falls off toward the poles to avoid pinching
-    ctx.globalCompositeOperation = 'lighter';
-    const drawStar = (x, y, r, a, tint) => {
-      const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-      g.addColorStop(0, `rgba(${tint[0]},${tint[1]},${tint[2]},${a})`);
-      g.addColorStop(0.4, `rgba(${tint[0]},${tint[1]},${tint[2]},${a * 0.35})`);
-      g.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = g;
-      ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
-    };
-    const tints = [[255, 255, 255], [190, 220, 255], [255, 226, 190], [200, 190, 255], [255, 190, 220]];
-    for (let i = 0; i < 2600; i++) {
-      const x = rng.next() * w;
-      const y = rng.next() * h;
-      if (rng.next() > Math.sin((y / h) * Math.PI) * 0.9 + 0.1) continue;
-      drawStar(x, y, rng.range(0.5, 1.6), rng.range(0.25, 0.9), rng.pick(tints));
-    }
-    for (let i = 0; i < 120; i++) {
-      drawStar(rng.next() * w, rng.range(h * 0.1, h * 0.9), rng.range(2.4, 6.5), rng.range(0.5, 1), rng.pick(tints));
-    }
-    // a few bright anchors with cross flares
+    // a handful of high circling birds, because an empty sky reads as a backdrop
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.strokeStyle = 'rgba(28,22,20,0.5)';
+    ctx.lineWidth = 1.6;
     for (let i = 0; i < 14; i++) {
-      const x = rng.next() * w, y = rng.range(h * 0.15, h * 0.85);
-      const tint = rng.pick(tints);
-      drawStar(x, y, rng.range(7, 14), 0.9, tint);
-      ctx.strokeStyle = `rgba(${tint[0]},${tint[1]},${tint[2]},0.45)`;
-      ctx.lineWidth = 1;
-      const L = rng.range(14, 34);
-      ctx.beginPath(); ctx.moveTo(x - L, y); ctx.lineTo(x + L, y); ctx.moveTo(x, y - L); ctx.lineTo(x, y + L); ctx.stroke();
+      const bx = rng.range(0.1, 0.9) * w, by = rng.range(0.10, 0.34) * h;
+      const sc = rng.range(3, 7);
+      ctx.beginPath();
+      ctx.moveTo(bx - sc, by);
+      ctx.quadraticCurveTo(bx - sc * 0.4, by - sc * 0.6, bx, by - sc * 0.1);
+      ctx.quadraticCurveTo(bx + sc * 0.4, by - sc * 0.6, bx + sc, by);
+      ctx.stroke();
     }
     return toTexture(c, { wrap: THREE.RepeatWrapping, mips: true });
   });
@@ -2720,10 +2737,13 @@ const globalUniforms = {
   uTime: { value: 0 },
   uLightDirView: { value: new THREE.Vector3(0.4, 0.8, 0.45).normalize() },
   uUpView: { value: new THREE.Vector3(0, 1, 0) },
-  uLightColor: { value: new THREE.Color(1.0, 0.95, 0.92).multiplyScalar(1.15) },
-  uSkyColor: { value: new THREE.Color(0.18, 0.26, 0.46) },
-  uGroundColor: { value: new THREE.Color(0.05, 0.04, 0.10) },
-  uFogColor: { value: new THREE.Color(0.035, 0.045, 0.10) },
+  // Golden hour: a warm low key light, warm sky fill from above, and bounce
+  // off dry dirt from below. The old cold blue fill is what made everything
+  // read as neon-lit plastic.
+  uLightColor: { value: new THREE.Color(1.0, 0.80, 0.55).multiplyScalar(1.30) },
+  uSkyColor: { value: new THREE.Color(0.30, 0.28, 0.34) },
+  uGroundColor: { value: new THREE.Color(0.17, 0.12, 0.08) },
+  uFogColor: { value: new THREE.Color(0.52, 0.38, 0.26) },
   uFogNear: { value: 90 },
   uFogFar: { value: 260 },
   // 0 = write linear HDR for the composite pass to tone map (the normal path).
@@ -2843,8 +2863,10 @@ const NOVA_FRAG = /* glsl */`
     float spec = pow(max(dot(N, H), 0.0), 42.0) * uSpec;
     lit += uLightColor * spec;
 
-    float fres = pow(1.0 - max(dot(N, V), 0.0), 4.5);
-    lit += uRimColor * fres * uRim;
+    // A tight, dim rim reads as sun wrap on a dusty edge. The old wide bright
+    // one outlined every object in colour, which is most of what "neon" was.
+    float fres = pow(1.0 - max(dot(N, V), 0.0), 6.5);
+    lit += uRimColor * fres * uRim * 0.34;
 
     lit += base * vEmit * uEmitScale;
     lit += uDissolveColor * edgeGlow * 3.4;
@@ -2885,8 +2907,8 @@ function createNovaMaterial(opts = {}) {
       uNoise: { value: noiseTexture() },
       uTint: { value: new THREE.Color(opts.tint !== undefined ? opts.tint : 0xffffff) },
       uFlashColor: { value: new THREE.Color(opts.flashColor !== undefined ? opts.flashColor : 0xffffff) },
-      uRimColor: { value: new THREE.Color(opts.rimColor !== undefined ? opts.rimColor : 0x53d9ff) },
-      uDissolveColor: { value: new THREE.Color(opts.dissolveColor !== undefined ? opts.dissolveColor : 0x8ce8ff) },
+      uRimColor: { value: new THREE.Color(opts.rimColor !== undefined ? opts.rimColor : 0xffc98a) },
+      uDissolveColor: { value: new THREE.Color(opts.dissolveColor !== undefined ? opts.dissolveColor : 0xffb060) },
       uFlash: { value: 0 },
       uEmitScale: { value: opts.emitScale !== undefined ? opts.emitScale : 1 },
       uOpacity: { value: opts.opacity !== undefined ? opts.opacity : 1 },
@@ -2948,29 +2970,33 @@ function createEnergyMaterial(opts = {}) {
 }
 
 /**
- * The arena deck. A procedural hex lattice with travelling scan pulses and up
- * to eight live impact ripples — no textures, so it stays crisp at any zoom.
+ * The canyon floor. Dry cracked earth: a cellular crack network over layered
+ * fbm tone, with dust kicked up by impacts. No lattice, no seam glow — the
+ * ground is lit, not emissive, which is most of what separates this from the
+ * neon deck it replaced.
  */
 function createFloorMaterial() {
   return new THREE.ShaderMaterial({
     toneMapped: false,
     transparent: false,
     uniforms: {
-      uOutput: globalUniforms.uOutput,
       uTime: globalUniforms.uTime,
+      uOutput: globalUniforms.uOutput,
       uFogColor: globalUniforms.uFogColor,
       uFogNear: globalUniforms.uFogNear,
       uFogFar: globalUniforms.uFogFar,
       uLightDirView: globalUniforms.uLightDirView,
+      uLightColor: globalUniforms.uLightColor,
+      uSkyColor: globalUniforms.uSkyColor,
       uNoise: { value: noiseTexture() },
-      uBase: { value: new THREE.Color(0x080d1c) },
-      uSeam: { value: new THREE.Color(0x2ad6ff) },
-      uAccent: { value: new THREE.Color(0xff3ea5) },
-      uDanger: { value: new THREE.Color(0x8b3fd0) },
+      uBase: { value: new THREE.Color(0x8a6a46) },      // dry dirt
+      uSeam: { value: new THREE.Color(0x53402c) },      // crack shadow
+      uAccent: { value: new THREE.Color(0xc2a374) },    // pale sand drift
+      uDanger: { value: new THREE.Color(0x7a2b22) },    // blood-dark, rises with threat
       uRadius: { value: 46 },
       uRipples: { value: Array.from({ length: 8 }, () => new THREE.Vector4(0, 0, -99, 0)) },
       uPlayerPos: { value: new THREE.Vector3() },
-      uThreat: { value: 0 },     // rises with danger — pushes the deck toward magenta
+      uThreat: { value: 0 },
       uCoreGlow: { value: 0 },
     },
     vertexShader: /* glsl */`
@@ -2988,87 +3014,93 @@ function createFloorMaterial() {
     `,
     fragmentShader: /* glsl */`
       precision highp float;
-  ${NOVA_OUT}
+      ${NOVA_OUT}
       uniform float uTime; uniform float uRadius; uniform float uThreat; uniform float uCoreGlow;
-      uniform vec3 uBase; uniform vec3 uSeam; uniform vec3 uAccent; uniform vec3 uDanger; uniform vec3 uFogColor;
+      uniform vec3 uBase; uniform vec3 uSeam; uniform vec3 uAccent; uniform vec3 uDanger;
+      uniform vec3 uFogColor; uniform vec3 uLightColor; uniform vec3 uSkyColor;
+      uniform vec3 uLightDirView;
       uniform float uFogNear; uniform float uFogFar;
       uniform vec4 uRipples[8];
       uniform vec3 uPlayerPos;
       uniform sampler2D uNoise;
       varying vec3 vWorldPos; varying float vDepth; varying vec3 vNormal;
 
-      const vec2 S = vec2(1.7320508, 1.0);
-      float hexDist(vec2 p){ p = abs(p); return max(dot(p, S * 0.5), p.y); }
-      vec4 hexCell(vec2 p){
-        vec4 hC = floor(vec4(p, p - vec2(0.8660254, 0.5)) / S.xyxy) + 0.5;
-        vec4 h = vec4(p - hC.xy * S, p - (hC.zw + 0.5) * S);
-        return dot(h.xy, h.xy) < dot(h.zw, h.zw) ? vec4(h.xy, hC.xy) : vec4(h.zw, hC.zw + 0.5);
+      vec2 hash22(vec2 p){
+        p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+        return fract(sin(p) * 43758.5453);
       }
-      float hash21(vec2 p){ return fract(sin(dot(p, vec2(27.619, 57.583))) * 43758.5453); }
+
+      /** Worley F2-F1: near zero along cell borders, which is where clay splits. */
+      float crackField(vec2 p){
+        vec2 n = floor(p), f = fract(p);
+        float f1 = 8.0, f2 = 8.0;
+        for (int j = -1; j <= 1; j++) {
+          for (int i = -1; i <= 1; i++) {
+            vec2 g = vec2(float(i), float(j));
+            float d = length(g + hash22(n + g) - f);
+            if (d < f1) { f2 = f1; f1 = d; } else if (d < f2) { f2 = d; }
+          }
+        }
+        return f2 - f1;
+      }
 
       void main(){
         vec2 p = vWorldPos.xz;
         float rad = length(p);
-        float t = uTime;
 
-        // two-tier lattice: big structural plates over a fine deck weave
-        vec4 plate = hexCell(p * 0.085);
-        float plateEdge = hexDist(plate.xy);
-        float plateSeam = smoothstep(0.435, 0.495, plateEdge);
-        float plateRand = hash21(plate.zw);
+        // Fine detail has no mips, and shimmering crack lines near the horizon
+        // are the fastest way to look cheap, so it fades with distance.
+        float detail = 1.0 - smoothstep(22.0, 74.0, vDepth);
 
-        vec4 hc = hexCell(p * 0.42);
-        float e = hexDist(hc.xy);
-        float seam = smoothstep(0.450, 0.498, e);
-        float cellRand = hash21(hc.zw);
+        float grain = texture2D(uNoise, p * 0.045).r * 0.55 + texture2D(uNoise, p * 0.21).g * 0.45;
+        float drift = texture2D(uNoise, p * 0.012).b;   // 'patch' is a GLSL reserved word
 
-        float grunge = texture2D(uNoise, p * 0.035).r * 0.55 + texture2D(uNoise, p * 0.15).g * 0.45;
-        vec3 col = uBase * (0.45 + grunge * 0.85);
-        col *= 0.84 + 0.16 * step(0.55, cellRand);
-        col *= 0.88 + 0.24 * plateRand;
+        // Two crack scales. These are hairline splits in dried clay, roughly a
+        // hand's width apart — an earlier pass had cells six metres across,
+        // which read as paving slabs rather than ground.
+        float big = 1.0 - smoothstep(0.0, 0.055, crackField(p * 0.45));
+        float fine = 1.0 - smoothstep(0.0, 0.085, crackField(p * 1.35));
+        float crack = clamp(big * 0.85 + fine * 0.5 * detail, 0.0, 1.0);
 
-        // scan pulse rolling out from the stabilizer
-        float scan = pow(sin(rad * 0.30 - t * 1.35) * 0.5 + 0.5, 14.0);
-        float breathe = 0.5 + 0.5 * sin(t * 0.7 + plateRand * 12.0);
+        // dirt tone: sun-bleached sand drifting over darker earth, in broad
+        // uneven blotches so no two stretches of ground look the same
+        vec3 albedo = mix(uBase, uAccent, smoothstep(0.34, 0.82, drift));
+        albedo = mix(albedo, uSeam, smoothstep(0.62, 0.16, drift) * 0.45);
+        albedo *= 0.70 + grain * 0.58;
+        albedo = mix(albedo, uSeam, crack * 0.34);
+        // blood-dark wash as the field gets dangerous, not a shift to magenta
+        albedo = mix(albedo, uDanger, uThreat * 0.16);
 
-        // danger tint is violet, not bullet-magenta, so hostile fire stays legible
-        vec3 seamCol = mix(uSeam, uDanger, uThreat * 0.72);
-        // fine detail fades with distance: procedural lines have no mips, and
-        // shimmering hex edges near the horizon are the fastest way to look cheap
-        float detailFade = 1.0 - smoothstep(26.0, 78.0, vDepth);
-        float fine = seam * (0.075 + breathe * 0.04 + scan * 0.20) * detailFade;
-        float heavy = plateSeam * (0.19 + breathe * 0.085 + scan * 0.42);
+        // lit, not emissive: flat key + sky fill, with the cracks self-shadowing
+        vec3 N = normalize(vNormal);
+        float ndl = max(dot(N, uLightDirView), 0.0);
+        float ao = 1.0 - crack * 0.26;
+        vec3 col = albedo * (uSkyColor * 0.85 * ao + uLightColor * (0.28 + ndl * 0.72) * ao);
 
-        // impact ripples ride the lattice
+        // dust kicked up by impacts
         float ripple = 0.0;
         for (int i = 0; i < 8; i++) {
           vec4 R = uRipples[i];
-          float age = t - R.z;
+          float age = uTime - R.z;
           if (age < 0.0 || age > 1.7) continue;
           float d = distance(p, R.xy);
           float r = age * 26.0;
           ripple += exp(-abs(d - r) * 0.55) * (1.0 - age / 1.7) * R.w;
         }
+        col = mix(col, uAccent * 1.05, clamp(ripple * 0.45, 0.0, 0.65));
 
-        col += seamCol * (fine + heavy + ripple * 0.9) * 1.35;
-        col += seamCol * ripple * 0.16;
-
-        // pilot proximity glow keeps the ship readable against the deck
+        // a soft pool of light around the rider keeps them readable on open ground
         float pd = distance(p, uPlayerPos.xz);
-        col += uSeam * 0.035 * exp(-pd * 0.20);
+        col += uLightColor * 0.030 * exp(-pd * 0.16);
+        col += uAccent * uCoreGlow * 0.05 * exp(-rad * 0.09);
 
-        // core well in the middle of the arena
-        float core = exp(-rad * 0.11);
-        col += mix(uSeam, vec3(1.0), 0.35) * core * (0.22 + uCoreGlow);
-
-        // rim treatment + falloff into the void
-        float edge = smoothstep(uRadius - 2.8, uRadius, rad);
-        col = mix(col, uAccent * 1.1, edge * 0.45);
-        float outside = smoothstep(uRadius, uRadius + 0.8, rad);
-        col *= (1.0 - outside * 0.85);
+        // the ground darkens toward the canyon wall: ambient occlusion at the
+        // scale of the whole arena, and it stops the floor reading as a disc
+        float edge = smoothstep(uRadius - 22.0, uRadius, rad);
+        col *= 1.0 - edge * 0.62;
 
         float fog = smoothstep(uFogNear, uFogFar, vDepth);
-        col = mix(col, uFogColor, fog * 0.9);
+        col = mix(col, uFogColor, fog * 0.92);
         gl_FragColor = vec4(novaOut(col), 1.0);
       }
     `,
@@ -3272,6 +3304,25 @@ const PALETTE = {
   voidLite: 0x6a49ab,
   rust: 0x6b3a2a,
   bone: 0xd8cfc0,
+
+  // ---- western earth palette ----
+  sand: 0xc2a374,
+  dirt: 0x8a6a46,
+  dirtDark: 0x53402c,
+  clay: 0xa8763f,
+  rockRed: 0xa35a38,
+  rockDark: 0x6b3a26,
+  rockLite: 0xc98a5e,
+  strata: 0x8f5535,
+  sage: 0x6e7a5e,
+  scrub: 0x4e5a3e,
+  timber: 0x6b4e33,
+  timberDark: 0x3e2c1d,
+  iron: 0x4a443e,
+  ironDark: 0x2a2622,
+  brass: 0xb08a3c,
+  cloth: 0xa89377,
+  ember: 0xff8a3c,
 };
 
 /** Accumulates transformed primitives into one flat geometry. */
@@ -3714,38 +3765,130 @@ function buildMaw() {
 // ======================================================================
 //  WORLD PROPS
 // ======================================================================
-function buildPillar(seed = 0) {
+/**
+ * Rock spire. Layered strata read as sedimentary rock: each slab is a slightly
+ * different earth tone, and the taper is irregular so no two read the same.
+ */
+function buildRockSpire(seed = 0) {
   const b = new MeshBuilder();
-  const h = 5.2 + (seed % 3) * 1.4;
-  b.add(tap(0.62, 0.95, 6), { pos: [0, h / 2, 0], scale: [2.0, h, 2.0], color: PALETTE.hullDark });
-  b.add(cyl(6), { pos: [0, 0.35, 0], scale: [2.5, 0.7, 2.5], color: PALETTE.hullMid });
-  b.add(cyl(6), { pos: [0, h + 0.2, 0], scale: [1.5, 0.5, 1.5], color: PALETTE.hullMid });
-  for (let i = 0; i < 3; i++) {
-    b.add(tor(0.5, 0.035, 5, 12), { pos: [0, 1.2 + i * (h / 3.4), 0], rot: [Math.PI / 2, 0, 0], scale: 1.9 - i * 0.16, color: PALETTE.cyan, emit: 2.0, flat: false });
+  const rnd = (n) => (((Math.sin(seed * 12.9898 + n * 78.233) * 43758.5453) % 1) + 1) % 1;
+  const h = 6.5 + rnd(0) * 7.0;
+  const layers = 5 + Math.floor(rnd(1) * 3);
+  const tones = [PALETTE.rockRed, PALETTE.rockDark, PALETTE.strata, PALETTE.rockLite, PALETTE.clay];
+  let y = 0;
+  let r = 2.4 + rnd(2) * 1.1;
+  for (let i = 0; i < layers; i++) {
+    const lh = (h / layers) * (0.7 + rnd(i + 3) * 0.7);
+    const rTop = r * (0.68 + rnd(i + 9) * 0.24);
+    b.add(tap(rTop, r, 6 + (i % 2)), {
+      pos: [rnd(i + 20) * 0.5 - 0.25, y + lh / 2, rnd(i + 30) * 0.5 - 0.25],
+      rot: [0, rnd(i + 40) * 1.2, 0],
+      scale: [2, lh, 2],
+      color: tones[i % tones.length],
+    });
+    y += lh * 0.94;
+    r = rTop;
   }
-  b.add(oct(0), { pos: [0, h + 0.85, 0], scale: 0.9, color: PALETTE.cyan, emit: 2.6 });
-  return { geometry: b.build('pillar'), radius: 1.15, height: h };
+  // rubble at the base, so the spire sits in the ground instead of on it
+  for (let i = 0; i < 5; i++) {
+    const a = rnd(i + 50) * TAU;
+    const rr = 2.0 + rnd(i + 60) * 1.6;
+    b.add(ico(0), {
+      pos: [Math.cos(a) * rr, 0.25 + rnd(i + 70) * 0.4, Math.sin(a) * rr],
+      rot: [rnd(i + 80) * 3, rnd(i + 85) * 3, rnd(i + 90) * 3],
+      scale: 0.7 + rnd(i + 95) * 1.1,
+      color: i % 2 ? PALETTE.rockDark : PALETTE.strata,
+    });
+  }
+  return { geometry: b.build('rock-spire'), radius: 2.6, height: h };
 }
 
-function buildStabilizer() {
-  const base = new MeshBuilder();
-  base.add(cyl(8), { pos: [0, 0.4, 0], scale: [7.0, 0.8, 7.0], color: PALETTE.hullDark });
-  base.add(cyl(8), { pos: [0, 0.9, 0], scale: [5.6, 0.5, 5.6], color: PALETTE.hullMid });
-  base.add(tor(0.5, 0.05, 6, 32), { pos: [0, 1.2, 0], rot: [Math.PI / 2, 0, 0], scale: 11.0, color: PALETTE.cyan, emit: 2.2, flat: false });
-  for (let i = 0; i < 6; i++) {
-    const a = (i / 6) * TAU;
-    base.add(wedgeGeometry(0.7, 1.6, 2.4, 0.4), { pos: [Math.cos(a) * 2.4, 1.6, Math.sin(a) * 2.4], rot: [0, -a, 0.28], color: PALETTE.hullMid });
+/** Bare desert tree — trunk with a few dead limbs. Silhouette, not foliage. */
+function buildDeadTree(seed = 0) {
+  const b = new MeshBuilder();
+  const rnd = (n) => (((Math.sin(seed * 4.1237 + n * 91.77) * 21374.9871) % 1) + 1) % 1;
+  const h = 4.4 + rnd(0) * 2.2;
+  b.add(tap(0.16, 0.42, 5), { pos: [0, h / 2, 0], scale: [2, h, 2], color: PALETTE.timberDark });
+  for (let i = 0; i < 5; i++) {
+    const a = rnd(i) * TAU;
+    const y = h * (0.45 + rnd(i + 5) * 0.5);
+    const len = 1.2 + rnd(i + 10) * 1.5;
+    b.add(tap(0.05, 0.16, 4), {
+      pos: [Math.cos(a) * len * 0.4, y, Math.sin(a) * len * 0.4],
+      rot: [Math.cos(a) * 0.9, -a, Math.sin(a) * 0.9],
+      scale: [2, len, 2],
+      color: PALETTE.timber,
+    });
   }
-  const crystal = new MeshBuilder();
-  crystal.add(oct(0), { scale: [1.7, 3.4, 1.7], color: PALETTE.cyan, emit: 2.4 });
-  crystal.add(oct(0), { scale: [1.0, 2.2, 1.0], rot: [0, 0.8, 0], color: 0xffffff, emit: 2.8 });
-  const ring = new MeshBuilder();
-  ring.add(tor(0.5, 0.04, 6, 28), { rot: [Math.PI / 2, 0, 0], scale: 5.2, color: PALETTE.cyan, emit: 2.4, flat: false });
+  return { geometry: b.build('dead-tree'), radius: 0.6, height: h };
+}
+
+/** Saguaro. Reads as "desert" from a single silhouette faster than anything else. */
+function buildCactus(seed = 0) {
+  const b = new MeshBuilder();
+  const rnd = (n) => (((Math.sin(seed * 7.77 + n * 33.13) * 9812.331) % 1) + 1) % 1;
+  const h = 3.0 + rnd(0) * 2.0;
+  b.add(cyl(8), { pos: [0, h / 2, 0], scale: [0.62, h, 0.62], color: PALETTE.scrub });
+  b.add(sph(8, 6), { pos: [0, h, 0], scale: 0.62, color: PALETTE.scrub, flat: false });
+  const arms = 1 + Math.floor(rnd(1) * 2);
+  for (let i = 0; i < arms; i++) {
+    const sx = i === 0 ? 1 : -1;
+    const y = h * (0.42 + rnd(i + 2) * 0.22);
+    const al = 0.9 + rnd(i + 4) * 0.5;
+    b.add(cyl(6), { pos: [sx * 0.5, y, 0], rot: [0, 0, -sx * 1.35], scale: [0.34, al, 0.34], color: PALETTE.sage });
+    b.add(cyl(6), { pos: [sx * (0.42 + al * 0.5), y + al * 0.55, 0], scale: [0.34, al * 0.9, 0.34], color: PALETTE.sage });
+    b.add(sph(8, 6), { pos: [sx * (0.42 + al * 0.5), y + al, 0], scale: 0.34, color: PALETTE.sage, flat: false });
+  }
+  return { geometry: b.build('cactus'), radius: 0.7, height: h };
+}
+
+/**
+ * The landmark at the centre of the arena — what the stabilizer used to be.
+ * Timber water tower with a windmill vane, so it has something that moves.
+ */
+function buildWaterTower() {
+  const frame = new MeshBuilder();
+  // four splayed legs with cross bracing
   for (let i = 0; i < 4; i++) {
-    const a = (i / 4) * TAU;
-    ring.add(box(), { pos: [Math.cos(a) * 2.6, 0, Math.sin(a) * 2.6], rot: [0, -a, 0], scale: [0.5, 0.14, 0.14], color: 0xffffff, emit: 2.6 });
+    const a = (i / 4) * TAU + Math.PI / 4;
+    const cx = Math.cos(a), cz = Math.sin(a);
+    frame.add(box(), {
+      pos: [cx * 3.1, 3.4, cz * 3.1], rot: [cz * 0.16, -a, -cx * 0.16],
+      scale: [0.42, 7.0, 0.42], color: PALETTE.timber,
+    });
+    frame.add(box(), {
+      pos: [cx * 2.6, 5.6, cz * 2.6], rot: [0, -a + Math.PI / 4, 0],
+      scale: [4.2, 0.22, 0.22], color: PALETTE.timberDark,
+    });
+    frame.add(box(), {
+      pos: [cx * 3.0, 2.4, cz * 3.0], rot: [0, -a + Math.PI / 4, 0],
+      scale: [4.6, 0.20, 0.20], color: PALETTE.timberDark,
+    });
   }
-  return { base: base.build('stab-base'), crystal: crystal.build('stab-crystal'), ring: ring.build('stab-ring') };
+  frame.add(box(), { pos: [0, 0.35, 0], scale: [7.6, 0.7, 7.6], color: PALETTE.dirtDark });
+  frame.add(cyl(10), { pos: [0, 7.1, 0], scale: [6.4, 0.35, 6.4], color: PALETTE.timberDark });
+
+  const tank = new MeshBuilder();
+  tank.add(cyl(12), { pos: [0, 1.9, 0], scale: [5.4, 3.8, 5.4], color: PALETTE.timber });
+  // iron hoops
+  for (let i = 0; i < 3; i++) {
+    tank.add(tor(0.5, 0.035, 6, 20), { pos: [0, 0.7 + i * 1.2, 0], rot: [Math.PI / 2, 0, 0], scale: 5.6, color: PALETTE.iron, flat: false });
+  }
+  tank.add(cone(12), { pos: [0, 4.5, 0], scale: [6.0, 1.5, 6.0], color: PALETTE.ironDark });
+  tank.add(cyl(6), { pos: [2.2, 0.2, 0], rot: [0, 0, 0.3], scale: [0.3, 2.2, 0.3], color: PALETTE.iron });
+
+  const vane = new MeshBuilder();
+  vane.add(cyl(8), { rot: [Math.PI / 2, 0, 0], scale: [0.34, 0.5, 0.34], color: PALETTE.iron });
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * TAU;
+    vane.add(box(), {
+      pos: [Math.cos(a) * 1.5, Math.sin(a) * 1.5, 0], rot: [0, 0, -a],
+      scale: [2.2, 0.5, 0.06], color: i % 2 ? PALETTE.timber : PALETTE.cloth,
+    });
+  }
+  vane.add(tor(0.5, 0.03, 5, 20), { scale: 3.4, color: PALETTE.iron, flat: false });
+
+  return { frame: frame.build('tower-frame'), tank: tank.build('tower-tank'), vane: vane.build('tower-vane') };
 }
 
 function buildShard() {
@@ -3839,15 +3982,19 @@ function pack(builder, clips, name, extra = {}) {
 // ======================================================================
 //  PLAYER CHASSIS
 // ======================================================================
+// Warm iron and brass rather than cyan energy. The hulls themselves are still
+// the sci-fi chassis — the rider and mount replace them in the cast pass — but
+// the colour they throw into muzzle flash, tracers and the ground ring is what
+// you actually see most of, so it moves first.
 const SHIP_SPEC = {
-  striker: { len: 3.0, wid: 1.05, hei: 0.62, wing: 1.35, sweep: 0.5, nac: 2, glow: PALETTE.cyan },
-  bastion: { len: 2.9, wid: 1.5, hei: 0.86, wing: 1.15, sweep: 0.26, nac: 1, glow: 0x63b4ff },
-  phantom: { len: 3.35, wid: 0.82, hei: 0.5, wing: 1.5, sweep: 0.8, nac: 3, glow: 0xc98bff },
+  striker: { len: 3.0, wid: 1.05, hei: 0.62, wing: 1.35, sweep: 0.5, nac: 2, glow: PALETTE.ember },
+  bastion: { len: 2.9, wid: 1.5, hei: 0.86, wing: 1.15, sweep: 0.26, nac: 1, glow: PALETTE.brass },
+  phantom: { len: 3.35, wid: 0.82, hei: 0.5, wing: 1.5, sweep: 0.8, nac: 3, glow: 0xffd08a },
 };
 
 function buildRiggedShip(kind = 'striker') {
   const sp = SHIP_SPEC[kind] || SHIP_SPEC.striker;
-  const dark = PALETTE.hullDark, mid = PALETTE.hullMid, lite = PALETTE.hullLite;
+  const dark = PALETTE.ironDark, mid = PALETTE.iron, lite = PALETTE.timber;
   const r = new RigBuilder();
 
   r.addBone('root');
@@ -3872,18 +4019,18 @@ function buildRiggedShip(kind = 'striker') {
   for (let i = 0; i < 4; i++) {
     r.part(PRIM.box(), { bone: 'hull', pos: [0, sp.hei * 0.5, -sp.len * 0.2 + i * 0.42], scale: [sp.wid * 0.5, 0.05, 0.1], color: dark });
   }
-  r.part(PRIM.sph(8, 6), { bone: 'canopy', scale: [sp.wid * 0.44, sp.hei * 0.5, sp.len * 0.3], color: sp.glow, emit: 1.6, flat: false });
+  r.part(PRIM.sph(8, 6), { bone: 'canopy', scale: [sp.wid * 0.44, sp.hei * 0.5, sp.len * 0.3], color: sp.glow, emit: 0.54, flat: false });
   r.part(PRIM.tor(0.5, 0.06, 5, 12), { bone: 'canopy', rot: [Math.PI / 2, 0, 0], scale: sp.wid * 0.95, color: lite, flat: false });
 
   // --- nose lance ---
   r.part(PRIM.cyl(6), { bone: 'nose', rot: [Math.PI / 2, 0, 0], scale: [0.2, 0.55, 0.2], color: PALETTE.hullWhite });
-  r.part(PRIM.cyl(6), { bone: 'nose', pos: [0, 0, -0.2], rot: [Math.PI / 2, 0, 0], scale: [0.12, 0.4, 0.12], color: sp.glow, emit: 2.8 });
-  r.part(PRIM.tor(0.5, 0.09, 5, 10), { bone: 'nose', pos: [0, 0, -0.08], scale: 0.42, color: sp.glow, emit: 2.2, flat: false });
+  r.part(PRIM.cyl(6), { bone: 'nose', pos: [0, 0, -0.2], rot: [Math.PI / 2, 0, 0], scale: [0.12, 0.4, 0.12], color: sp.glow, emit: 0.95 });
+  r.part(PRIM.tor(0.5, 0.09, 5, 10), { bone: 'nose', pos: [0, 0, -0.08], scale: 0.42, color: sp.glow, emit: 0.75, flat: false });
 
   // --- wings ---
   for (const [bone, s] of [['wingL', 1], ['wingR', -1]]) {
     r.part(PRIM.wedge(sp.wing, 0.13, 1.5, 0.55), { bone, pos: [s * sp.wing * 0.42, 0, 0], color: mid });
-    r.part(PRIM.box(), { bone, pos: [s * sp.wing * 0.82, 0.04, 0.1], scale: [0.1, 0.09, 1.1], color: sp.glow, emit: 2.4 });
+    r.part(PRIM.box(), { bone, pos: [s * sp.wing * 0.82, 0.04, 0.1], scale: [0.1, 0.09, 1.1], color: sp.glow, emit: 0.82 });
     r.part(PRIM.wedge(0.1, 0.5, 0.8, 0.4), { bone, pos: [s * sp.wing * 0.94, 0.22, 0.16], rot: [0, 0, s * 0.12], color: lite });
     r.part(PRIM.box(), { bone, pos: [s * sp.wing * 0.55, -0.08, -0.3], scale: [0.24, 0.1, 0.5], color: dark });
     if (kind === 'bastion') {
@@ -3896,19 +4043,19 @@ function buildRiggedShip(kind = 'striker') {
   for (const bone of nacelles) {
     const w = sp.nac === 1 ? 0.62 : 0.3;
     r.part(PRIM.cyl(8), { bone, rot: [Math.PI / 2, 0, 0], scale: [w, 0.85, w], color: dark });
-    r.part(PRIM.tor(0.5, 0.12, 6, 12), { bone, pos: [0, 0, 0.16], scale: w * 1.05, color: sp.glow, emit: 3.0, flat: false });
-    r.part(PRIM.cyl(8), { bone, pos: [0, 0, 0.14], rot: [Math.PI / 2, 0, 0], scale: [w * 0.72, 0.16, w * 0.72], color: 0xffffff, emit: 3.4 });
+    r.part(PRIM.tor(0.5, 0.12, 6, 12), { bone, pos: [0, 0, 0.16], scale: w * 1.05, color: sp.glow, emit: 1.02, flat: false });
+    r.part(PRIM.cyl(8), { bone, pos: [0, 0, 0.14], rot: [Math.PI / 2, 0, 0], scale: [w * 0.72, 0.16, w * 0.72], color: 0xffffff, emit: 1.16 });
     r.part(PRIM.box(), { bone, pos: [0, w * 0.75, -0.1], scale: [w * 0.4, 0.08, 0.7], color: lite });
   }
 
   // --- dorsal fin ---
   r.part(PRIM.wedge(0.09, 0.62, 1.1, 0.35), { bone: 'fin', color: lite });
-  r.part(PRIM.box(), { bone: 'fin', pos: [0, 0.17, 0], scale: [0.06, 0.05, 0.9], color: sp.glow, emit: 2.6 });
+  r.part(PRIM.box(), { bone: 'fin', pos: [0, 0.17, 0], scale: [0.06, 0.05, 0.9], color: sp.glow, emit: 0.88 });
 
   // --- hover gear ---
   for (const bone of ['gearL', 'gearR', 'gearBL', 'gearBR']) {
     r.part(PRIM.cyl(6), { bone, scale: [0.3, 0.1, 0.3], color: dark });
-    r.part(PRIM.cyl(6), { bone, pos: [0, -0.09, 0], scale: [0.22, 0.05, 0.22], color: sp.glow, emit: 2.4 });
+    r.part(PRIM.cyl(6), { bone, pos: [0, -0.09, 0], scale: [0.22, 0.05, 0.22], color: sp.glow, emit: 0.82 });
     r.part(PRIM.box(), { bone, pos: [0, 0.06, 0], scale: [0.1, 0.16, 0.1], color: PALETTE.hullWhite });
   }
 
@@ -4932,7 +5079,9 @@ class Renderer {
     this.quadScene.add(this.quad);
 
     this.brightMat = new THREE.ShaderMaterial({
-      uniforms: { tDiffuse: { value: null }, uThreshold: { value: 0.72 }, uSoft: { value: 0.45 } },
+      // Only real highlights bloom now — the sun, muzzle flash, fire. A low
+      // threshold made every lit surface glow, which is what read as neon.
+      uniforms: { tDiffuse: { value: null }, uThreshold: { value: 0.92 }, uSoft: { value: 0.35 } },
       vertexShader: FS_VERT,
       depthTest: false, depthWrite: false, toneMapped: false,
       fragmentShader: /* glsl */`
@@ -4976,15 +5125,15 @@ class Renderer {
         tScene: { value: null },
         tBloom: { value: null },
         tBloom2: { value: null },
-        uBloom: { value: 0.85 },
+        uBloom: { value: 0.42 },
         uUseBloom: { value: 1 },
         uUseBloom2: { value: 1 },
         uExposure: { value: 1.0 },
-        uVignette: { value: 0.42 },
+        uVignette: { value: 0.55 },
         uAberration: { value: 0.0 },
         uGrain: { value: 0.03 },
         uTime: { value: 0 },
-        uSaturation: { value: 1.06 },
+        uSaturation: { value: 0.94 },
         uFlashColor: { value: new THREE.Color(0, 0, 0) },
         uFlash: { value: 0 },
         uDesaturate: { value: 0 },
@@ -5052,6 +5201,10 @@ class Renderer {
           // grade
           float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
           col = mix(vec3(luma), col, uSaturation);
+          // Split tone: warm highlights, cool shadows. This is the single
+          // cheapest thing that makes a render read as photographed rather
+          // than as flat lit geometry.
+          col *= mix(vec3(0.84, 0.91, 1.08), vec3(1.09, 1.00, 0.87), smoothstep(0.0, 0.62, luma));
           col = mix(col, vec3(luma), uDesaturate);
           col = mix(col, uFlashColor, uFlash);
 
@@ -6269,60 +6422,58 @@ class World {
     this.floor.receiveShadow = false;
     scene.add(this.floor);
 
-    // ---------- hull beneath the deck ----------
-    this.shellMat = createNovaMaterial({ rim: 0.35, spec: 0.15 });
-    this.shell = new THREE.Mesh(this._buildShell(), this.shellMat);
-    scene.add(this.shell);
+    // ---------- canyon rim ----------
+    // Rock instead of an energy fence: a boundary you can read from any angle
+    // and which does not glow. Merged to one draw call.
+    this.rimMat = createNovaMaterial({ rim: 0.30, spec: 0.06, rimColor: 0xffb877 });
+    this.rim = new THREE.Mesh(this._buildRim(), this.rimMat);
+    this.rim.frustumCulled = false;
+    scene.add(this.rim);
 
-    // ---------- containment barrier ----------
-    // A low camera looks along the barrier instead of down through it, and an
-    // additive shell seen edge-on stacks into a solid wall. A tighter fresnel
-    // keeps it a rim highlight from every angle.
-    this.barrierMat = createEnergyMaterial({ color: 0x46e6ff, opacity: 0.30, power: 4.4, pulse: 0.16 });
-    this.barrier = new THREE.Mesh(new THREE.CylinderGeometry(this.radius, this.radius, 6.5, 72, 1, true), this.barrierMat);
-    this.barrier.position.y = 3.1;
-    this.barrier.renderOrder = 7;
-    scene.add(this.barrier);
-
-    // ---------- centre stabilizer ----------
-    const stab = buildStabilizer();
-    this.stabMat = createNovaMaterial({ rim: 0.7, spec: 0.5 });
+    // ---------- water tower at the centre ----------
+    const tower = buildWaterTower();
+    this.towerMat = createNovaMaterial({ rim: 0.35, spec: 0.14, rimColor: 0xffc98a });
     this.stabGroup = new THREE.Group();
-    this.stabBase = new THREE.Mesh(stab.base, this.stabMat);
-    this.stabCrystal = new THREE.Mesh(stab.crystal, this.stabMat);
-    this.stabCrystal.position.y = 6.4;
-    this.stabRingA = new THREE.Mesh(stab.ring, this.stabMat);
-    this.stabRingA.position.y = 6.4;
-    this.stabRingB = new THREE.Mesh(stab.ring, this.stabMat);
-    this.stabRingB.position.y = 6.4;
-    this.stabRingB.rotation.z = Math.PI / 3;
-    this.stabGroup.add(this.stabBase, this.stabCrystal, this.stabRingA, this.stabRingB);
+    this.towerFrame = new THREE.Mesh(tower.frame, this.towerMat);
+    this.towerTank = new THREE.Mesh(tower.tank, this.towerMat);
+    this.towerTank.position.y = 7.3;
+    this.towerVane = new THREE.Mesh(tower.vane, this.towerMat);
+    this.towerVane.position.set(0, 13.4, -1.6);
+    this.stabGroup.add(this.towerFrame, this.towerTank, this.towerVane);
     scene.add(this.stabGroup);
-    this._stabGeos = [stab.base, stab.crystal, stab.ring];
+    this._stabGeos = [tower.frame, tower.tank, tower.vane];
 
-    // ---------- cover pillars ----------
-    this.pillarMat = createNovaMaterial({ rim: 0.5, spec: 0.3 });
+    // ---------- cover: spires, dead trees, cactus ----------
+    this.pillarMat = createNovaMaterial({ rim: 0.28, spec: 0.05, rimColor: 0xffb877 });
     this.pillars = [];
     const layout = [
-      [0.30, 24], [1.35, 30], [2.35, 22], [3.35, 31], [4.35, 25], [5.35, 30],
-      [0.85, 38], [2.90, 39], [4.95, 38],
+      [0.30, 24, 'spire'], [1.35, 30, 'spire'], [2.35, 22, 'tree'], [3.35, 31, 'spire'],
+      [4.35, 25, 'spire'], [5.35, 30, 'tree'], [0.85, 38, 'spire'], [2.90, 39, 'cactus'],
+      [4.95, 38, 'spire'], [1.90, 15, 'cactus'], [3.90, 17, 'tree'], [5.90, 36, 'cactus'],
     ];
-    const pillarGeos = [buildPillar(0), buildPillar(1), buildPillar(2)];
-    this._pillarGeos = pillarGeos.map((p) => p.geometry);
-    layout.forEach(([a, r], i) => {
-      const spec = pillarGeos[i % pillarGeos.length];
+    const kinds = {
+      spire: [buildRockSpire(0), buildRockSpire(1), buildRockSpire(2)],
+      tree: [buildDeadTree(0), buildDeadTree(1)],
+      cactus: [buildCactus(0), buildCactus(1)],
+    };
+    this._pillarGeos = [];
+    for (const k in kinds) for (const g of kinds[k]) this._pillarGeos.push(g.geometry);
+    layout.forEach(([a, r, kind], i) => {
+      const pool = kinds[kind];
+      const spec = pool[i % pool.length];
       const m = new THREE.Mesh(spec.geometry, this.pillarMat);
       const x = Math.cos(a) * r, z = Math.sin(a) * r;
       m.position.set(x, 0, z);
-      m.rotation.y = a;
-      const s = i >= 6 ? 0.8 : 1;
+      m.rotation.y = a * 1.7;
+      const s = kind === 'spire' ? (i >= 6 ? 0.85 : 1) : 1;
       m.scale.setScalar(s);
       scene.add(m);
       this.pillars.push(m);
-      this.obstacles.push({ x, z, r: spec.radius * s * 1.5, height: spec.height * s });
+      // only rock blocks; you ride straight through a cactus or a dead tree
+      if (kind === 'spire') this.obstacles.push({ x, z, r: spec.radius * s * 1.5, height: spec.height * s });
     });
-    // the stabilizer itself is solid
-    this.obstacles.push({ x: 0, z: 0, r: 6.2, height: 4, core: true });
+    // the tower's legs are solid
+    this.obstacles.push({ x: 0, z: 0, r: 4.4, height: 7, core: true });
 
     // ---------- parallax debris islands ----------
     this.islands = this._buildIslands();
@@ -6339,62 +6490,85 @@ class World {
     scene.add(this.motes);
   }
 
-  _buildShell() {
+  /**
+   * The canyon that rings the arena. Chunky rock blocks at varied height and
+   * radius, plus a low apron of scree so the ground meets the wall instead of
+   * ending at a line. One merged geometry, one draw call.
+   */
+  _buildRim() {
     const b = new MeshBuilder();
     const R = this.radius;
-    // rim wall
-    b.add(new THREE.CylinderGeometry(R + 1.2, R + 0.6, 2.6, 72, 1, true), { pos: [0, -1.3, 0], color: PALETTE.hullDark, flat: false });
-    b.add(new THREE.TorusGeometry(0.5, 0.02, 6, 80), { pos: [0, -0.06, 0], rot: [Math.PI / 2, 0, 0], scale: (R + 1.2) * 2, color: PALETTE.cyan, emit: 2.2, flat: false });
-    // tapered underside
-    b.add(new THREE.CylinderGeometry(R * 0.98, R * 0.16, 15, 40, 1, true), { pos: [0, -9, 0], color: PALETTE.hullDark, flat: false });
-    b.add(new THREE.CylinderGeometry(R * 0.16, 0.4, 7, 20, 1, true), { pos: [0, -19.5, 0], color: 0x0d1122, flat: false });
-    // structural spars
-    for (let i = 0; i < 10; i++) {
-      const a = (i / 10) * TAU;
-      b.add(new THREE.BoxGeometry(1, 1, 1), {
-        pos: [Math.cos(a) * R * 0.55, -7.5, Math.sin(a) * R * 0.55],
-        rot: [Math.cos(a) * 0.42, -a, Math.sin(a) * 0.42],
-        scale: [1.5, 15, 1.5], color: PALETTE.hullMid,
-      });
-      b.add(new THREE.BoxGeometry(1, 1, 1), {
-        pos: [Math.cos(a) * (R + 0.6), -2.4, Math.sin(a) * (R + 0.6)],
-        rot: [0, -a, 0], scale: [1.0, 0.28, 0.28], color: PALETTE.cyan, emit: 2.0,
+    const rng = new RNG(31337);
+    const tones = [PALETTE.rockRed, PALETTE.rockDark, PALETTE.strata, PALETTE.clay, PALETTE.rockLite];
+
+    // Per-block value jitter. Without it the wall reads as a fence of identical
+    // flat-shaded boxes; rock is the same hue at a dozen different values.
+    const tint = (hex, k) => {
+      const r = Math.min(255, Math.round(((hex >> 16) & 255) * k));
+      const g = Math.min(255, Math.round(((hex >> 8) & 255) * k));
+      const b = Math.min(255, Math.round((hex & 255) * k));
+      return (r << 16) | (g << 8) | b;
+    };
+
+    const blocks = 64;
+    for (let i = 0; i < blocks; i++) {
+      const a = (i / blocks) * TAU;
+      const wob = rng.range(-2.4, 2.6);
+      const h = rng.range(11, 30);
+      const rr = R + 3.0 + wob;
+      // stack two or three slabs so the wall has a stepped, eroded profile
+      let y = -1.5;
+      const slabs = 2 + Math.floor(rng.next() * 2);
+      for (let k = 0; k < slabs; k++) {
+        const sh = (h / slabs) * rng.range(0.75, 1.25);
+        b.add(new THREE.CylinderGeometry(0.5, 0.62, 1, 5), {
+          pos: [Math.cos(a) * rr, y + sh / 2, Math.sin(a) * rr],
+          rot: [rng.range(-0.06, 0.06), a + rng.range(-0.5, 0.5), rng.range(-0.05, 0.05)],
+          scale: [rng.range(8, 15), sh, rng.range(7, 12)],
+          color: tint(tones[(i + k) % tones.length], rng.range(0.42, 1.02)),
+        });
+        y += sh * 0.86;
+      }
+    }
+    // scree apron
+    for (let i = 0; i < 90; i++) {
+      const a = rng.next() * TAU;
+      const rr = R - rng.range(0, 5.5);
+      b.add(new THREE.IcosahedronGeometry(0.5, 0), {
+        pos: [Math.cos(a) * rr, rng.range(0.1, 0.6), Math.sin(a) * rr],
+        rot: [rng.next() * TAU, rng.next() * TAU, rng.next() * TAU],
+        scale: rng.range(0.5, 2.4),
+        color: tint(rng.next() < 0.5 ? PALETTE.rockDark : PALETTE.strata, rng.range(0.55, 1.0)),
       });
     }
-    // hanging cables / broken struts for silhouette interest
-    for (let i = 0; i < 6; i++) {
-      const a = (i / 6) * TAU + 0.4;
-      b.add(new THREE.CylinderGeometry(0.16, 0.06, 1, 5), {
-        pos: [Math.cos(a) * R * 0.8, -13, Math.sin(a) * R * 0.8],
-        rot: [0.2, 0, 0.15], scale: [1, 12, 1], color: PALETTE.hullDark,
-      });
-    }
-    return b.build('arena-shell');
+    return b.build('canyon-rim');
   }
 
+  /** Mesas out past the canyon. Flat-topped, hazed, purely for the horizon. */
   _buildIslands() {
     const b = new MeshBuilder();
     const rng = this.rng;
-    for (let i = 0; i < 22; i++) {
+    for (let i = 0; i < 26; i++) {
       const a = rng.next() * TAU;
-      const r = rng.range(78, 210);
-      const y = rng.range(-52, 26);
-      const s = rng.range(3.5, 15);
-      b.add(new THREE.IcosahedronGeometry(0.5, 0), {
-        pos: [Math.cos(a) * r, y, Math.sin(a) * r],
-        rot: [rng.next() * TAU, rng.next() * TAU, rng.next() * TAU],
-        scale: [s, s * rng.range(0.4, 0.9), s * rng.range(0.7, 1.3)],
-        color: i % 4 === 0 ? PALETTE.voidMid : PALETTE.hullDark,
+      const r = rng.range(120, 320);
+      const h = rng.range(14, 62);
+      const w = rng.range(18, 62);
+      b.add(new THREE.CylinderGeometry(0.44, 0.5, 1, 6), {
+        pos: [Math.cos(a) * r, h / 2 - 6, Math.sin(a) * r],
+        rot: [0, rng.next() * TAU, 0],
+        scale: [w, h, w * rng.range(0.6, 1.3)],
+        color: i % 3 === 0 ? PALETTE.rockDark : PALETTE.strata,
       });
-      if (i % 3 === 0) {
-        b.add(new THREE.TorusGeometry(0.5, 0.03, 5, 14), {
-          pos: [Math.cos(a) * r, y + s * 0.6, Math.sin(a) * r],
-          rot: [Math.PI / 2 + rng.range(-0.4, 0.4), 0, rng.range(-0.4, 0.4)],
-          scale: s * 1.7, color: PALETTE.violet, emit: 1.8, flat: false,
-        });
-      }
+      // a shoulder of talus so they do not read as cylinders
+      b.add(new THREE.CylinderGeometry(0.5, 0.72, 1, 6), {
+        pos: [Math.cos(a) * r, -4, Math.sin(a) * r],
+        rot: [0, rng.next() * TAU, 0],
+        scale: [w * 1.35, h * 0.24, w * 1.2],
+        color: PALETTE.rockDark,
+      });
     }
-    const mesh = new THREE.Mesh(b.build('islands'), createNovaMaterial({ rim: 0.8, spec: 0.1, fog: 0.55 }));
+    // fog eats most of them, which is the point: depth without detail
+    const mesh = new THREE.Mesh(b.build('mesas'), createNovaMaterial({ rim: 0.18, spec: 0.02, fog: 1.0, rimColor: 0xffb877 }));
     mesh.frustumCulled = false;
     this._islandMat = mesh.material;
     return mesh;
@@ -6405,9 +6579,10 @@ class World {
     const geo = new THREE.CircleGeometry(this.radius + 1, 72);
     this._mistGeo = geo;
     this._mistMats = [];
+    // Blown dust rather than energy mist: warm, low, and drifting one way.
     const layers = [
-      { y: 0.55, scale: 0.028, speed: 0.012, opacity: 0.22, color: 0x2f6fa8 },
-      { y: 1.9, scale: 0.017, speed: -0.008, opacity: 0.13, color: 0x6a4fb0 },
+      { y: 0.45, scale: 0.026, speed: 0.020, opacity: 0.30, color: 0xb08a5c },
+      { y: 1.7, scale: 0.015, speed: 0.012, opacity: 0.16, color: 0x8d6a48 },
     ];
     for (const L of layers) {
       const mat = new THREE.ShaderMaterial({
@@ -6468,7 +6643,7 @@ class World {
       const a = rng.next() * TAU;
       const r = Math.sqrt(rng.next()) * (this.radius + 14);
       pos[i * 3] = Math.cos(a) * r;
-      pos[i * 3 + 1] = rng.range(0.4, 26);
+      pos[i * 3 + 1] = rng.range(0.2, 11);
       pos[i * 3 + 2] = Math.sin(a) * r;
       seed[i] = rng.next() * TAU;
     }
@@ -6477,7 +6652,7 @@ class World {
     geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 300);
     const mat = new THREE.ShaderMaterial({
       transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false,
-      uniforms: { uTime: { value: 0 }, uColor: { value: new THREE.Color(0x6fd6ff) }, uScale: { value: 300 } },
+      uniforms: { uTime: { value: 0 }, uColor: { value: new THREE.Color(0xe6c48f) }, uScale: { value: 300 } },
       vertexShader: /* glsl */`
         attribute float aSeed;
         uniform float uTime; uniform float uScale;
@@ -6528,17 +6703,13 @@ class World {
     u.uCoreGlow.value = coreGlow;
     if (playerPos) u.uPlayerPos.value.copy(playerPos);
 
-    this.stabCrystal.rotation.y += dt * 0.35;
-    this.stabCrystal.position.y = 6.4 + Math.sin(this.time * 0.9) * 0.32;
-    this.stabRingA.rotation.y += dt * 0.7;
-    this.stabRingA.rotation.x = Math.sin(this.time * 0.4) * 0.35;
-    this.stabRingB.rotation.y -= dt * 0.5;
-    this.stabRingB.rotation.z = Math.PI / 3 + Math.cos(this.time * 0.33) * 0.4;
+    // the windmill turns in gusts, not at a constant rate
+    this._vaneSpin = (this._vaneSpin || 0) + dt * (1.6 + Math.sin(this.time * 0.31) * 0.9);
+    this.towerVane.rotation.z = this._vaneSpin;
+    this.towerTank.position.y = 7.3;
 
-    this.islands.rotation.y += dt * 0.006;
     for (const m of this._mistMats) m.uniforms.uTime.value = this.time;
     this._moteMat.uniforms.uTime.value = this.time;
-    this.barrierMat.uniforms.uOpacity.value = 0.055 + this.threat * 0.075 + Math.sin(this.time * 1.7) * 0.015;
   }
 
   /** Reset per-run visual state. */
@@ -6557,11 +6728,10 @@ class World {
   dispose() {
     this.sky.geometry.dispose(); this.sky.material.dispose();
     this.floor.geometry.dispose(); this.floorMat.dispose();
-    this.shell.geometry.dispose(); this.shellMat.dispose();
-    this.barrier.geometry.dispose(); this.barrierMat.dispose();
+    this.rim.geometry.dispose(); this.rimMat.dispose();
     this._stabGeos.forEach((g) => g.dispose());
     this._pillarGeos.forEach((g) => g.dispose());
-    this.stabMat.dispose(); this.pillarMat.dispose();
+    this.towerMat.dispose(); this.pillarMat.dispose();
     this.islands.geometry.dispose(); this._islandMat.dispose();
     this.motes.geometry.dispose(); this._moteMat.dispose();
     this._mistGeo.dispose();
@@ -8146,7 +8316,7 @@ class Player {
       const spec = buildRiggedShip(id);
       this._shipGeos[id] = spec.geometry;
       const pose = new Pose(spec.skeleton);
-      const mat = createNovaMaterial({ pose, rim: 0.85, spec: 0.6, rimColor: 0x8ff0ff });
+      const mat = createNovaMaterial({ pose, rim: 0.85, spec: 0.6, rimColor: 0xffc98a });
       const m = new THREE.Mesh(spec.geometry, mat);
       m.visible = false;
       m.frustumCulled = false;
@@ -8157,7 +8327,7 @@ class Player {
     this.hullMat = this.meshes.striker.mat;
     this.animator = this.meshes.striker.animator;
 
-    this.shieldMat = createEnergyMaterial({ color: 0x46e6ff, opacity: 0.0, power: 3.6, pulse: 0.1 });
+    this.shieldMat = createEnergyMaterial({ color: 0xffbb70, opacity: 0.0, power: 3.6, pulse: 0.1 });
     this.shieldMesh = new THREE.Mesh(new THREE.SphereGeometry(2.05, 20, 14), this.shieldMat);
     this.group.add(this.shieldMesh);
 
@@ -8170,7 +8340,7 @@ class Player {
 
     // Ground ring: the single biggest readability win for a small ship on a
     // busy deck — it says "you are here" without cluttering the HUD.
-    this.ringMat = createRingMaterial({ color: 0x46e6ff, thickness: 0.055 });
+    this.ringMat = createRingMaterial({ color: 0xffc07a, thickness: 0.055 });
     this.groundRing = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.ringMat);
     this.groundRing.rotation.x = -Math.PI / 2;
     this.groundRing.scale.set(5.6, 5.6, 1);
@@ -12061,7 +12231,7 @@ class Game {
     u.uFlash.value = flashes ? s.flash * 0.5 : 0;
     u.uFlashColor.value.copy(s.flashColor);
     u.uDesaturate.value = s.desaturate;
-    u.uSaturation.value = 1.06 + (this.player && this.player.overdriveActive > 0 ? 0.22 : 0);
+    u.uSaturation.value = 0.94 + (this.player && this.player.overdriveActive > 0 ? 0.20 : 0);
     u.uExposure.value = 1.0 + (this.player && this.player.overdriveActive > 0 ? 0.12 : 0);
   }
 

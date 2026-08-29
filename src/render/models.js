@@ -25,6 +25,25 @@ export const PALETTE = {
   voidLite: 0x6a49ab,
   rust: 0x6b3a2a,
   bone: 0xd8cfc0,
+
+  // ---- western earth palette ----
+  sand: 0xc2a374,
+  dirt: 0x8a6a46,
+  dirtDark: 0x53402c,
+  clay: 0xa8763f,
+  rockRed: 0xa35a38,
+  rockDark: 0x6b3a26,
+  rockLite: 0xc98a5e,
+  strata: 0x8f5535,
+  sage: 0x6e7a5e,
+  scrub: 0x4e5a3e,
+  timber: 0x6b4e33,
+  timberDark: 0x3e2c1d,
+  iron: 0x4a443e,
+  ironDark: 0x2a2622,
+  brass: 0xb08a3c,
+  cloth: 0xa89377,
+  ember: 0xff8a3c,
 };
 
 /** Accumulates transformed primitives into one flat geometry. */
@@ -467,38 +486,130 @@ export function buildMaw() {
 // ======================================================================
 //  WORLD PROPS
 // ======================================================================
-export function buildPillar(seed = 0) {
+/**
+ * Rock spire. Layered strata read as sedimentary rock: each slab is a slightly
+ * different earth tone, and the taper is irregular so no two read the same.
+ */
+export function buildRockSpire(seed = 0) {
   const b = new MeshBuilder();
-  const h = 5.2 + (seed % 3) * 1.4;
-  b.add(tap(0.62, 0.95, 6), { pos: [0, h / 2, 0], scale: [2.0, h, 2.0], color: PALETTE.hullDark });
-  b.add(cyl(6), { pos: [0, 0.35, 0], scale: [2.5, 0.7, 2.5], color: PALETTE.hullMid });
-  b.add(cyl(6), { pos: [0, h + 0.2, 0], scale: [1.5, 0.5, 1.5], color: PALETTE.hullMid });
-  for (let i = 0; i < 3; i++) {
-    b.add(tor(0.5, 0.035, 5, 12), { pos: [0, 1.2 + i * (h / 3.4), 0], rot: [Math.PI / 2, 0, 0], scale: 1.9 - i * 0.16, color: PALETTE.cyan, emit: 2.0, flat: false });
+  const rnd = (n) => (((Math.sin(seed * 12.9898 + n * 78.233) * 43758.5453) % 1) + 1) % 1;
+  const h = 6.5 + rnd(0) * 7.0;
+  const layers = 5 + Math.floor(rnd(1) * 3);
+  const tones = [PALETTE.rockRed, PALETTE.rockDark, PALETTE.strata, PALETTE.rockLite, PALETTE.clay];
+  let y = 0;
+  let r = 2.4 + rnd(2) * 1.1;
+  for (let i = 0; i < layers; i++) {
+    const lh = (h / layers) * (0.7 + rnd(i + 3) * 0.7);
+    const rTop = r * (0.68 + rnd(i + 9) * 0.24);
+    b.add(tap(rTop, r, 6 + (i % 2)), {
+      pos: [rnd(i + 20) * 0.5 - 0.25, y + lh / 2, rnd(i + 30) * 0.5 - 0.25],
+      rot: [0, rnd(i + 40) * 1.2, 0],
+      scale: [2, lh, 2],
+      color: tones[i % tones.length],
+    });
+    y += lh * 0.94;
+    r = rTop;
   }
-  b.add(oct(0), { pos: [0, h + 0.85, 0], scale: 0.9, color: PALETTE.cyan, emit: 2.6 });
-  return { geometry: b.build('pillar'), radius: 1.15, height: h };
+  // rubble at the base, so the spire sits in the ground instead of on it
+  for (let i = 0; i < 5; i++) {
+    const a = rnd(i + 50) * TAU;
+    const rr = 2.0 + rnd(i + 60) * 1.6;
+    b.add(ico(0), {
+      pos: [Math.cos(a) * rr, 0.25 + rnd(i + 70) * 0.4, Math.sin(a) * rr],
+      rot: [rnd(i + 80) * 3, rnd(i + 85) * 3, rnd(i + 90) * 3],
+      scale: 0.7 + rnd(i + 95) * 1.1,
+      color: i % 2 ? PALETTE.rockDark : PALETTE.strata,
+    });
+  }
+  return { geometry: b.build('rock-spire'), radius: 2.6, height: h };
 }
 
-export function buildStabilizer() {
-  const base = new MeshBuilder();
-  base.add(cyl(8), { pos: [0, 0.4, 0], scale: [7.0, 0.8, 7.0], color: PALETTE.hullDark });
-  base.add(cyl(8), { pos: [0, 0.9, 0], scale: [5.6, 0.5, 5.6], color: PALETTE.hullMid });
-  base.add(tor(0.5, 0.05, 6, 32), { pos: [0, 1.2, 0], rot: [Math.PI / 2, 0, 0], scale: 11.0, color: PALETTE.cyan, emit: 2.2, flat: false });
-  for (let i = 0; i < 6; i++) {
-    const a = (i / 6) * TAU;
-    base.add(wedgeGeometry(0.7, 1.6, 2.4, 0.4), { pos: [Math.cos(a) * 2.4, 1.6, Math.sin(a) * 2.4], rot: [0, -a, 0.28], color: PALETTE.hullMid });
+/** Bare desert tree — trunk with a few dead limbs. Silhouette, not foliage. */
+export function buildDeadTree(seed = 0) {
+  const b = new MeshBuilder();
+  const rnd = (n) => (((Math.sin(seed * 4.1237 + n * 91.77) * 21374.9871) % 1) + 1) % 1;
+  const h = 4.4 + rnd(0) * 2.2;
+  b.add(tap(0.16, 0.42, 5), { pos: [0, h / 2, 0], scale: [2, h, 2], color: PALETTE.timberDark });
+  for (let i = 0; i < 5; i++) {
+    const a = rnd(i) * TAU;
+    const y = h * (0.45 + rnd(i + 5) * 0.5);
+    const len = 1.2 + rnd(i + 10) * 1.5;
+    b.add(tap(0.05, 0.16, 4), {
+      pos: [Math.cos(a) * len * 0.4, y, Math.sin(a) * len * 0.4],
+      rot: [Math.cos(a) * 0.9, -a, Math.sin(a) * 0.9],
+      scale: [2, len, 2],
+      color: PALETTE.timber,
+    });
   }
-  const crystal = new MeshBuilder();
-  crystal.add(oct(0), { scale: [1.7, 3.4, 1.7], color: PALETTE.cyan, emit: 2.4 });
-  crystal.add(oct(0), { scale: [1.0, 2.2, 1.0], rot: [0, 0.8, 0], color: 0xffffff, emit: 2.8 });
-  const ring = new MeshBuilder();
-  ring.add(tor(0.5, 0.04, 6, 28), { rot: [Math.PI / 2, 0, 0], scale: 5.2, color: PALETTE.cyan, emit: 2.4, flat: false });
+  return { geometry: b.build('dead-tree'), radius: 0.6, height: h };
+}
+
+/** Saguaro. Reads as "desert" from a single silhouette faster than anything else. */
+export function buildCactus(seed = 0) {
+  const b = new MeshBuilder();
+  const rnd = (n) => (((Math.sin(seed * 7.77 + n * 33.13) * 9812.331) % 1) + 1) % 1;
+  const h = 3.0 + rnd(0) * 2.0;
+  b.add(cyl(8), { pos: [0, h / 2, 0], scale: [0.62, h, 0.62], color: PALETTE.scrub });
+  b.add(sph(8, 6), { pos: [0, h, 0], scale: 0.62, color: PALETTE.scrub, flat: false });
+  const arms = 1 + Math.floor(rnd(1) * 2);
+  for (let i = 0; i < arms; i++) {
+    const sx = i === 0 ? 1 : -1;
+    const y = h * (0.42 + rnd(i + 2) * 0.22);
+    const al = 0.9 + rnd(i + 4) * 0.5;
+    b.add(cyl(6), { pos: [sx * 0.5, y, 0], rot: [0, 0, -sx * 1.35], scale: [0.34, al, 0.34], color: PALETTE.sage });
+    b.add(cyl(6), { pos: [sx * (0.42 + al * 0.5), y + al * 0.55, 0], scale: [0.34, al * 0.9, 0.34], color: PALETTE.sage });
+    b.add(sph(8, 6), { pos: [sx * (0.42 + al * 0.5), y + al, 0], scale: 0.34, color: PALETTE.sage, flat: false });
+  }
+  return { geometry: b.build('cactus'), radius: 0.7, height: h };
+}
+
+/**
+ * The landmark at the centre of the arena — what the stabilizer used to be.
+ * Timber water tower with a windmill vane, so it has something that moves.
+ */
+export function buildWaterTower() {
+  const frame = new MeshBuilder();
+  // four splayed legs with cross bracing
   for (let i = 0; i < 4; i++) {
-    const a = (i / 4) * TAU;
-    ring.add(box(), { pos: [Math.cos(a) * 2.6, 0, Math.sin(a) * 2.6], rot: [0, -a, 0], scale: [0.5, 0.14, 0.14], color: 0xffffff, emit: 2.6 });
+    const a = (i / 4) * TAU + Math.PI / 4;
+    const cx = Math.cos(a), cz = Math.sin(a);
+    frame.add(box(), {
+      pos: [cx * 3.1, 3.4, cz * 3.1], rot: [cz * 0.16, -a, -cx * 0.16],
+      scale: [0.42, 7.0, 0.42], color: PALETTE.timber,
+    });
+    frame.add(box(), {
+      pos: [cx * 2.6, 5.6, cz * 2.6], rot: [0, -a + Math.PI / 4, 0],
+      scale: [4.2, 0.22, 0.22], color: PALETTE.timberDark,
+    });
+    frame.add(box(), {
+      pos: [cx * 3.0, 2.4, cz * 3.0], rot: [0, -a + Math.PI / 4, 0],
+      scale: [4.6, 0.20, 0.20], color: PALETTE.timberDark,
+    });
   }
-  return { base: base.build('stab-base'), crystal: crystal.build('stab-crystal'), ring: ring.build('stab-ring') };
+  frame.add(box(), { pos: [0, 0.35, 0], scale: [7.6, 0.7, 7.6], color: PALETTE.dirtDark });
+  frame.add(cyl(10), { pos: [0, 7.1, 0], scale: [6.4, 0.35, 6.4], color: PALETTE.timberDark });
+
+  const tank = new MeshBuilder();
+  tank.add(cyl(12), { pos: [0, 1.9, 0], scale: [5.4, 3.8, 5.4], color: PALETTE.timber });
+  // iron hoops
+  for (let i = 0; i < 3; i++) {
+    tank.add(tor(0.5, 0.035, 6, 20), { pos: [0, 0.7 + i * 1.2, 0], rot: [Math.PI / 2, 0, 0], scale: 5.6, color: PALETTE.iron, flat: false });
+  }
+  tank.add(cone(12), { pos: [0, 4.5, 0], scale: [6.0, 1.5, 6.0], color: PALETTE.ironDark });
+  tank.add(cyl(6), { pos: [2.2, 0.2, 0], rot: [0, 0, 0.3], scale: [0.3, 2.2, 0.3], color: PALETTE.iron });
+
+  const vane = new MeshBuilder();
+  vane.add(cyl(8), { rot: [Math.PI / 2, 0, 0], scale: [0.34, 0.5, 0.34], color: PALETTE.iron });
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * TAU;
+    vane.add(box(), {
+      pos: [Math.cos(a) * 1.5, Math.sin(a) * 1.5, 0], rot: [0, 0, -a],
+      scale: [2.2, 0.5, 0.06], color: i % 2 ? PALETTE.timber : PALETTE.cloth,
+    });
+  }
+  vane.add(tor(0.5, 0.03, 5, 20), { scale: 3.4, color: PALETTE.iron, flat: false });
+
+  return { frame: frame.build('tower-frame'), tank: tank.build('tower-tank'), vane: vane.build('tower-vane') };
 }
 
 export function buildShard() {

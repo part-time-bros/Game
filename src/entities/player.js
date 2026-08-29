@@ -37,7 +37,7 @@ export class Player {
       const spec = buildRiggedShip(id);
       this._shipGeos[id] = spec.geometry;
       const pose = new Pose(spec.skeleton);
-      const mat = createNovaMaterial({ pose, rim: 0.85, spec: 0.6, rimColor: 0x8ff0ff });
+      const mat = createNovaMaterial({ pose, rim: 0.85, spec: 0.6, rimColor: 0xffc98a });
       const m = new THREE.Mesh(spec.geometry, mat);
       m.visible = false;
       m.frustumCulled = false;
@@ -48,7 +48,7 @@ export class Player {
     this.hullMat = this.meshes.striker.mat;
     this.animator = this.meshes.striker.animator;
 
-    this.shieldMat = createEnergyMaterial({ color: 0x46e6ff, opacity: 0.0, power: 3.6, pulse: 0.1 });
+    this.shieldMat = createEnergyMaterial({ color: 0xffbb70, opacity: 0.0, power: 3.6, pulse: 0.1 });
     this.shieldMesh = new THREE.Mesh(new THREE.SphereGeometry(2.05, 20, 14), this.shieldMat);
     this.group.add(this.shieldMesh);
 
@@ -61,7 +61,7 @@ export class Player {
 
     // Ground ring: the single biggest readability win for a small ship on a
     // busy deck — it says "you are here" without cluttering the HUD.
-    this.ringMat = createRingMaterial({ color: 0x46e6ff, thickness: 0.055 });
+    this.ringMat = createRingMaterial({ color: 0xffc07a, thickness: 0.055 });
     this.groundRing = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.ringMat);
     this.groundRing.rotation.x = -Math.PI / 2;
     this.groundRing.scale.set(5.6, 5.6, 1);

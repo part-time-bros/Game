@@ -933,7 +933,7 @@ export class Game {
     u.uFlash.value = flashes ? s.flash * 0.5 : 0;
     u.uFlashColor.value.copy(s.flashColor);
     u.uDesaturate.value = s.desaturate;
-    u.uSaturation.value = 1.06 + (this.player && this.player.overdriveActive > 0 ? 0.22 : 0);
+    u.uSaturation.value = 0.94 + (this.player && this.player.overdriveActive > 0 ? 0.20 : 0);
     u.uExposure.value = 1.0 + (this.player && this.player.overdriveActive > 0 ? 0.12 : 0);
   }
 

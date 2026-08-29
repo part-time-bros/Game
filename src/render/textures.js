@@ -174,8 +174,9 @@ export function noiseTexture(size = 256) {
 }
 
 /**
- * Equirectangular deep-space backdrop: nebula fbm, dust lanes and three
- * star populations. Baked once so the sky costs nothing per frame.
+ * Equirectangular sky: a desert dusk. Warm low sun near the horizon, banded
+ * cloud lit from that side, indigo overhead, dust haze at the bottom. Baked
+ * once, so the sky costs nothing per frame.
  */
 export function skyTexture(w = 2048, h = 1024) {
   return cached('sky', () => {
@@ -185,58 +186,74 @@ export function skyTexture(w = 2048, h = 1024) {
     const c = canvas(w, h), ctx = c.getContext('2d');
     const img = ctx.createImageData(w, h);
     const d = img.data;
+
+    const SUN_U = 0.30;          // where the sun sits around the horizon
+    const SUN_V = 0.505;         // just below the horizon line: long shadows
+    const mix = (a, b, t) => a + (b - a) * t;
+
     for (let y = 0; y < h; y++) {
       const v = y / h;
-      // vertical gradient: violet zenith -> deep navy horizon -> near black nadir
-      const grad = Math.pow(1 - Math.abs(v - 0.42) * 1.8, 2);
+      // 0 at the horizon, 1 at the zenith
+      const up = clamp01((0.5 - v) * 2);
       for (let x = 0; x < w; x++) {
         const u = x / w;
-        // Sample the noise on a circle in u so the equirect map tiles
-        // seamlessly around the horizon — a straight u ramp leaves a hard edge.
+        // Sample noise on a circle in u so the map wraps without a seam.
         const ang = u * TAU;
         const cx = Math.cos(ang) * 2.6, cy = Math.sin(ang) * 2.6;
-        const cloud = fbm(noise, cx + 8, cy + 8 + v * 3.2, 5, 2.1, 0.55);
-        const cloud2 = fbm(noise2, cx * 1.7 + 21, cy * 1.7 + 15 + v * 5.1, 4, 2.0, 0.5);
-        const neb = Math.pow(clamp01(cloud * 1.35 - 0.28), 2.1);
-        const neb2 = Math.pow(clamp01(cloud2 * 1.2 - 0.42), 2.6);
-        let r = 5 + grad * 10 + neb * 92 + neb2 * 118;
-        let g = 6 + grad * 12 + neb * 34 + neb2 * 22;
-        let b = 14 + grad * 34 + neb * 138 + neb2 * 96;
+
+        // angular distance to the sun, wrapped
+        let du = Math.abs(u - SUN_U);
+        if (du > 0.5) du = 1 - du;
+        const dv = v - SUN_V;
+        const sunD = Math.sqrt(du * du * 4 + dv * dv * 3.2);
+
+        // sky gradient: warm at the horizon, indigo overhead
+        let r = mix(232, 38, Math.pow(up, 0.62));
+        let g = mix(150, 58, Math.pow(up, 0.55));
+        let b = mix(92, 104, Math.pow(up, 0.40));
+
+        // the sun's own glow, and a broad warm wash along the horizon
+        const glow = Math.exp(-sunD * 5.2);
+        const wash = Math.exp(-Math.abs(dv) * 7.0) * (0.35 + 0.65 * Math.exp(-du * 3.0));
+        r += glow * 210 + wash * 70;
+        g += glow * 150 + wash * 38;
+        b += glow * 72 + wash * 12;
+
+        if (v < 0.5) {
+          // cloud banding: stretched hard in v so it reads as layered strata
+          const cloud = fbm(noise, cx + 8, cy * 0.35 + up * 5.2 + 8, 5, 2.1, 0.55);
+          const cloud2 = fbm(noise2, cx * 1.7 + 21, cy * 0.5 + up * 8.0 + 15, 4, 2.0, 0.5);
+          const band = Math.pow(clamp01(cloud * 1.25 - 0.30), 1.7) * (1 - up * 0.55);
+          const wisp = Math.pow(clamp01(cloud2 * 1.1 - 0.44), 2.2) * (1 - up * 0.3);
+          // lit from the sun side, shadowed away from it
+          const lit = clamp01(0.25 + Math.exp(-du * 2.4) * 0.95);
+          r += band * mix(52, 235, lit) + wisp * mix(30, 150, lit);
+          g += band * mix(44, 158, lit) + wisp * mix(26, 96, lit);
+          b += band * mix(58, 104, lit) + wisp * mix(38, 82, lit);
+        } else {
+          // below the horizon: dust, darkening downward
+          const k = clamp01((v - 0.5) * 2.6);
+          r = mix(r, 74, k); g = mix(g, 54, k); b = mix(b, 38, k);
+        }
+
         const i = (y * w + x) * 4;
-        d[i] = r; d[i + 1] = g; d[i + 2] = b; d[i + 3] = 255;
+        d[i] = Math.min(255, r); d[i + 1] = Math.min(255, g); d[i + 2] = Math.min(255, b); d[i + 3] = 255;
       }
     }
     ctx.putImageData(img, 0, 0);
 
-    // star field — density falls off toward the poles to avoid pinching
-    ctx.globalCompositeOperation = 'lighter';
-    const drawStar = (x, y, r, a, tint) => {
-      const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-      g.addColorStop(0, `rgba(${tint[0]},${tint[1]},${tint[2]},${a})`);
-      g.addColorStop(0.4, `rgba(${tint[0]},${tint[1]},${tint[2]},${a * 0.35})`);
-      g.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = g;
-      ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
-    };
-    const tints = [[255, 255, 255], [190, 220, 255], [255, 226, 190], [200, 190, 255], [255, 190, 220]];
-    for (let i = 0; i < 2600; i++) {
-      const x = rng.next() * w;
-      const y = rng.next() * h;
-      if (rng.next() > Math.sin((y / h) * Math.PI) * 0.9 + 0.1) continue;
-      drawStar(x, y, rng.range(0.5, 1.6), rng.range(0.25, 0.9), rng.pick(tints));
-    }
-    for (let i = 0; i < 120; i++) {
-      drawStar(rng.next() * w, rng.range(h * 0.1, h * 0.9), rng.range(2.4, 6.5), rng.range(0.5, 1), rng.pick(tints));
-    }
-    // a few bright anchors with cross flares
+    // a handful of high circling birds, because an empty sky reads as a backdrop
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.strokeStyle = 'rgba(28,22,20,0.5)';
+    ctx.lineWidth = 1.6;
     for (let i = 0; i < 14; i++) {
-      const x = rng.next() * w, y = rng.range(h * 0.15, h * 0.85);
-      const tint = rng.pick(tints);
-      drawStar(x, y, rng.range(7, 14), 0.9, tint);
-      ctx.strokeStyle = `rgba(${tint[0]},${tint[1]},${tint[2]},0.45)`;
-      ctx.lineWidth = 1;
-      const L = rng.range(14, 34);
-      ctx.beginPath(); ctx.moveTo(x - L, y); ctx.lineTo(x + L, y); ctx.moveTo(x, y - L); ctx.lineTo(x, y + L); ctx.stroke();
+      const bx = rng.range(0.1, 0.9) * w, by = rng.range(0.10, 0.34) * h;
+      const sc = rng.range(3, 7);
+      ctx.beginPath();
+      ctx.moveTo(bx - sc, by);
+      ctx.quadraticCurveTo(bx - sc * 0.4, by - sc * 0.6, bx, by - sc * 0.1);
+      ctx.quadraticCurveTo(bx + sc * 0.4, by - sc * 0.6, bx + sc, by);
+      ctx.stroke();
     }
     return toTexture(c, { wrap: THREE.RepeatWrapping, mips: true });
   });

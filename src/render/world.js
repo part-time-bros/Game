@@ -4,10 +4,10 @@
  * Everything here is static or shader-animated, so the whole environment costs
  * a handful of draw calls no matter what the fight is doing.
  */
-import { TAU, clamp01, lerp } from '../core/util.js';
-import { createFloorMaterial, createSkyMaterial, createNovaMaterial, createEnergyMaterial } from './materials.js';
+import { TAU, clamp01, lerp, RNG } from '../core/util.js';
+import { createFloorMaterial, createSkyMaterial, createNovaMaterial } from './materials.js';
 import { noiseTexture } from './textures.js';
-import { MeshBuilder, PALETTE, buildPillar, buildStabilizer } from './models.js';
+import { MeshBuilder, PALETTE, buildRockSpire, buildDeadTree, buildCactus, buildWaterTower } from './models.js';
 
 export const ARENA_RADIUS = 46;
 
@@ -37,60 +37,58 @@ export class World {
     this.floor.receiveShadow = false;
     scene.add(this.floor);
 
-    // ---------- hull beneath the deck ----------
-    this.shellMat = createNovaMaterial({ rim: 0.35, spec: 0.15 });
-    this.shell = new THREE.Mesh(this._buildShell(), this.shellMat);
-    scene.add(this.shell);
+    // ---------- canyon rim ----------
+    // Rock instead of an energy fence: a boundary you can read from any angle
+    // and which does not glow. Merged to one draw call.
+    this.rimMat = createNovaMaterial({ rim: 0.30, spec: 0.06, rimColor: 0xffb877 });
+    this.rim = new THREE.Mesh(this._buildRim(), this.rimMat);
+    this.rim.frustumCulled = false;
+    scene.add(this.rim);
 
-    // ---------- containment barrier ----------
-    // A low camera looks along the barrier instead of down through it, and an
-    // additive shell seen edge-on stacks into a solid wall. A tighter fresnel
-    // keeps it a rim highlight from every angle.
-    this.barrierMat = createEnergyMaterial({ color: 0x46e6ff, opacity: 0.30, power: 4.4, pulse: 0.16 });
-    this.barrier = new THREE.Mesh(new THREE.CylinderGeometry(this.radius, this.radius, 6.5, 72, 1, true), this.barrierMat);
-    this.barrier.position.y = 3.1;
-    this.barrier.renderOrder = 7;
-    scene.add(this.barrier);
-
-    // ---------- centre stabilizer ----------
-    const stab = buildStabilizer();
-    this.stabMat = createNovaMaterial({ rim: 0.7, spec: 0.5 });
+    // ---------- water tower at the centre ----------
+    const tower = buildWaterTower();
+    this.towerMat = createNovaMaterial({ rim: 0.35, spec: 0.14, rimColor: 0xffc98a });
     this.stabGroup = new THREE.Group();
-    this.stabBase = new THREE.Mesh(stab.base, this.stabMat);
-    this.stabCrystal = new THREE.Mesh(stab.crystal, this.stabMat);
-    this.stabCrystal.position.y = 6.4;
-    this.stabRingA = new THREE.Mesh(stab.ring, this.stabMat);
-    this.stabRingA.position.y = 6.4;
-    this.stabRingB = new THREE.Mesh(stab.ring, this.stabMat);
-    this.stabRingB.position.y = 6.4;
-    this.stabRingB.rotation.z = Math.PI / 3;
-    this.stabGroup.add(this.stabBase, this.stabCrystal, this.stabRingA, this.stabRingB);
+    this.towerFrame = new THREE.Mesh(tower.frame, this.towerMat);
+    this.towerTank = new THREE.Mesh(tower.tank, this.towerMat);
+    this.towerTank.position.y = 7.3;
+    this.towerVane = new THREE.Mesh(tower.vane, this.towerMat);
+    this.towerVane.position.set(0, 13.4, -1.6);
+    this.stabGroup.add(this.towerFrame, this.towerTank, this.towerVane);
     scene.add(this.stabGroup);
-    this._stabGeos = [stab.base, stab.crystal, stab.ring];
+    this._stabGeos = [tower.frame, tower.tank, tower.vane];
 
-    // ---------- cover pillars ----------
-    this.pillarMat = createNovaMaterial({ rim: 0.5, spec: 0.3 });
+    // ---------- cover: spires, dead trees, cactus ----------
+    this.pillarMat = createNovaMaterial({ rim: 0.28, spec: 0.05, rimColor: 0xffb877 });
     this.pillars = [];
     const layout = [
-      [0.30, 24], [1.35, 30], [2.35, 22], [3.35, 31], [4.35, 25], [5.35, 30],
-      [0.85, 38], [2.90, 39], [4.95, 38],
+      [0.30, 24, 'spire'], [1.35, 30, 'spire'], [2.35, 22, 'tree'], [3.35, 31, 'spire'],
+      [4.35, 25, 'spire'], [5.35, 30, 'tree'], [0.85, 38, 'spire'], [2.90, 39, 'cactus'],
+      [4.95, 38, 'spire'], [1.90, 15, 'cactus'], [3.90, 17, 'tree'], [5.90, 36, 'cactus'],
     ];
-    const pillarGeos = [buildPillar(0), buildPillar(1), buildPillar(2)];
-    this._pillarGeos = pillarGeos.map((p) => p.geometry);
-    layout.forEach(([a, r], i) => {
-      const spec = pillarGeos[i % pillarGeos.length];
+    const kinds = {
+      spire: [buildRockSpire(0), buildRockSpire(1), buildRockSpire(2)],
+      tree: [buildDeadTree(0), buildDeadTree(1)],
+      cactus: [buildCactus(0), buildCactus(1)],
+    };
+    this._pillarGeos = [];
+    for (const k in kinds) for (const g of kinds[k]) this._pillarGeos.push(g.geometry);
+    layout.forEach(([a, r, kind], i) => {
+      const pool = kinds[kind];
+      const spec = pool[i % pool.length];
       const m = new THREE.Mesh(spec.geometry, this.pillarMat);
       const x = Math.cos(a) * r, z = Math.sin(a) * r;
       m.position.set(x, 0, z);
-      m.rotation.y = a;
-      const s = i >= 6 ? 0.8 : 1;
+      m.rotation.y = a * 1.7;
+      const s = kind === 'spire' ? (i >= 6 ? 0.85 : 1) : 1;
       m.scale.setScalar(s);
       scene.add(m);
       this.pillars.push(m);
-      this.obstacles.push({ x, z, r: spec.radius * s * 1.5, height: spec.height * s });
+      // only rock blocks; you ride straight through a cactus or a dead tree
+      if (kind === 'spire') this.obstacles.push({ x, z, r: spec.radius * s * 1.5, height: spec.height * s });
     });
-    // the stabilizer itself is solid
-    this.obstacles.push({ x: 0, z: 0, r: 6.2, height: 4, core: true });
+    // the tower's legs are solid
+    this.obstacles.push({ x: 0, z: 0, r: 4.4, height: 7, core: true });
 
     // ---------- parallax debris islands ----------
     this.islands = this._buildIslands();
@@ -107,62 +105,85 @@ export class World {
     scene.add(this.motes);
   }
 
-  _buildShell() {
+  /**
+   * The canyon that rings the arena. Chunky rock blocks at varied height and
+   * radius, plus a low apron of scree so the ground meets the wall instead of
+   * ending at a line. One merged geometry, one draw call.
+   */
+  _buildRim() {
     const b = new MeshBuilder();
     const R = this.radius;
-    // rim wall
-    b.add(new THREE.CylinderGeometry(R + 1.2, R + 0.6, 2.6, 72, 1, true), { pos: [0, -1.3, 0], color: PALETTE.hullDark, flat: false });
-    b.add(new THREE.TorusGeometry(0.5, 0.02, 6, 80), { pos: [0, -0.06, 0], rot: [Math.PI / 2, 0, 0], scale: (R + 1.2) * 2, color: PALETTE.cyan, emit: 2.2, flat: false });
-    // tapered underside
-    b.add(new THREE.CylinderGeometry(R * 0.98, R * 0.16, 15, 40, 1, true), { pos: [0, -9, 0], color: PALETTE.hullDark, flat: false });
-    b.add(new THREE.CylinderGeometry(R * 0.16, 0.4, 7, 20, 1, true), { pos: [0, -19.5, 0], color: 0x0d1122, flat: false });
-    // structural spars
-    for (let i = 0; i < 10; i++) {
-      const a = (i / 10) * TAU;
-      b.add(new THREE.BoxGeometry(1, 1, 1), {
-        pos: [Math.cos(a) * R * 0.55, -7.5, Math.sin(a) * R * 0.55],
-        rot: [Math.cos(a) * 0.42, -a, Math.sin(a) * 0.42],
-        scale: [1.5, 15, 1.5], color: PALETTE.hullMid,
-      });
-      b.add(new THREE.BoxGeometry(1, 1, 1), {
-        pos: [Math.cos(a) * (R + 0.6), -2.4, Math.sin(a) * (R + 0.6)],
-        rot: [0, -a, 0], scale: [1.0, 0.28, 0.28], color: PALETTE.cyan, emit: 2.0,
+    const rng = new RNG(31337);
+    const tones = [PALETTE.rockRed, PALETTE.rockDark, PALETTE.strata, PALETTE.clay, PALETTE.rockLite];
+
+    // Per-block value jitter. Without it the wall reads as a fence of identical
+    // flat-shaded boxes; rock is the same hue at a dozen different values.
+    const tint = (hex, k) => {
+      const r = Math.min(255, Math.round(((hex >> 16) & 255) * k));
+      const g = Math.min(255, Math.round(((hex >> 8) & 255) * k));
+      const b = Math.min(255, Math.round((hex & 255) * k));
+      return (r << 16) | (g << 8) | b;
+    };
+
+    const blocks = 64;
+    for (let i = 0; i < blocks; i++) {
+      const a = (i / blocks) * TAU;
+      const wob = rng.range(-2.4, 2.6);
+      const h = rng.range(11, 30);
+      const rr = R + 3.0 + wob;
+      // stack two or three slabs so the wall has a stepped, eroded profile
+      let y = -1.5;
+      const slabs = 2 + Math.floor(rng.next() * 2);
+      for (let k = 0; k < slabs; k++) {
+        const sh = (h / slabs) * rng.range(0.75, 1.25);
+        b.add(new THREE.CylinderGeometry(0.5, 0.62, 1, 5), {
+          pos: [Math.cos(a) * rr, y + sh / 2, Math.sin(a) * rr],
+          rot: [rng.range(-0.06, 0.06), a + rng.range(-0.5, 0.5), rng.range(-0.05, 0.05)],
+          scale: [rng.range(8, 15), sh, rng.range(7, 12)],
+          color: tint(tones[(i + k) % tones.length], rng.range(0.42, 1.02)),
+        });
+        y += sh * 0.86;
+      }
+    }
+    // scree apron
+    for (let i = 0; i < 90; i++) {
+      const a = rng.next() * TAU;
+      const rr = R - rng.range(0, 5.5);
+      b.add(new THREE.IcosahedronGeometry(0.5, 0), {
+        pos: [Math.cos(a) * rr, rng.range(0.1, 0.6), Math.sin(a) * rr],
+        rot: [rng.next() * TAU, rng.next() * TAU, rng.next() * TAU],
+        scale: rng.range(0.5, 2.4),
+        color: tint(rng.next() < 0.5 ? PALETTE.rockDark : PALETTE.strata, rng.range(0.55, 1.0)),
       });
     }
-    // hanging cables / broken struts for silhouette interest
-    for (let i = 0; i < 6; i++) {
-      const a = (i / 6) * TAU + 0.4;
-      b.add(new THREE.CylinderGeometry(0.16, 0.06, 1, 5), {
-        pos: [Math.cos(a) * R * 0.8, -13, Math.sin(a) * R * 0.8],
-        rot: [0.2, 0, 0.15], scale: [1, 12, 1], color: PALETTE.hullDark,
-      });
-    }
-    return b.build('arena-shell');
+    return b.build('canyon-rim');
   }
 
+  /** Mesas out past the canyon. Flat-topped, hazed, purely for the horizon. */
   _buildIslands() {
     const b = new MeshBuilder();
     const rng = this.rng;
-    for (let i = 0; i < 22; i++) {
+    for (let i = 0; i < 26; i++) {
       const a = rng.next() * TAU;
-      const r = rng.range(78, 210);
-      const y = rng.range(-52, 26);
-      const s = rng.range(3.5, 15);
-      b.add(new THREE.IcosahedronGeometry(0.5, 0), {
-        pos: [Math.cos(a) * r, y, Math.sin(a) * r],
-        rot: [rng.next() * TAU, rng.next() * TAU, rng.next() * TAU],
-        scale: [s, s * rng.range(0.4, 0.9), s * rng.range(0.7, 1.3)],
-        color: i % 4 === 0 ? PALETTE.voidMid : PALETTE.hullDark,
+      const r = rng.range(120, 320);
+      const h = rng.range(14, 62);
+      const w = rng.range(18, 62);
+      b.add(new THREE.CylinderGeometry(0.44, 0.5, 1, 6), {
+        pos: [Math.cos(a) * r, h / 2 - 6, Math.sin(a) * r],
+        rot: [0, rng.next() * TAU, 0],
+        scale: [w, h, w * rng.range(0.6, 1.3)],
+        color: i % 3 === 0 ? PALETTE.rockDark : PALETTE.strata,
       });
-      if (i % 3 === 0) {
-        b.add(new THREE.TorusGeometry(0.5, 0.03, 5, 14), {
-          pos: [Math.cos(a) * r, y + s * 0.6, Math.sin(a) * r],
-          rot: [Math.PI / 2 + rng.range(-0.4, 0.4), 0, rng.range(-0.4, 0.4)],
-          scale: s * 1.7, color: PALETTE.violet, emit: 1.8, flat: false,
-        });
-      }
+      // a shoulder of talus so they do not read as cylinders
+      b.add(new THREE.CylinderGeometry(0.5, 0.72, 1, 6), {
+        pos: [Math.cos(a) * r, -4, Math.sin(a) * r],
+        rot: [0, rng.next() * TAU, 0],
+        scale: [w * 1.35, h * 0.24, w * 1.2],
+        color: PALETTE.rockDark,
+      });
     }
-    const mesh = new THREE.Mesh(b.build('islands'), createNovaMaterial({ rim: 0.8, spec: 0.1, fog: 0.55 }));
+    // fog eats most of them, which is the point: depth without detail
+    const mesh = new THREE.Mesh(b.build('mesas'), createNovaMaterial({ rim: 0.18, spec: 0.02, fog: 1.0, rimColor: 0xffb877 }));
     mesh.frustumCulled = false;
     this._islandMat = mesh.material;
     return mesh;
@@ -173,9 +194,10 @@ export class World {
     const geo = new THREE.CircleGeometry(this.radius + 1, 72);
     this._mistGeo = geo;
     this._mistMats = [];
+    // Blown dust rather than energy mist: warm, low, and drifting one way.
     const layers = [
-      { y: 0.55, scale: 0.028, speed: 0.012, opacity: 0.22, color: 0x2f6fa8 },
-      { y: 1.9, scale: 0.017, speed: -0.008, opacity: 0.13, color: 0x6a4fb0 },
+      { y: 0.45, scale: 0.026, speed: 0.020, opacity: 0.30, color: 0xb08a5c },
+      { y: 1.7, scale: 0.015, speed: 0.012, opacity: 0.16, color: 0x8d6a48 },
     ];
     for (const L of layers) {
       const mat = new THREE.ShaderMaterial({
@@ -236,7 +258,7 @@ export class World {
       const a = rng.next() * TAU;
       const r = Math.sqrt(rng.next()) * (this.radius + 14);
       pos[i * 3] = Math.cos(a) * r;
-      pos[i * 3 + 1] = rng.range(0.4, 26);
+      pos[i * 3 + 1] = rng.range(0.2, 11);
       pos[i * 3 + 2] = Math.sin(a) * r;
       seed[i] = rng.next() * TAU;
     }
@@ -245,7 +267,7 @@ export class World {
     geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 300);
     const mat = new THREE.ShaderMaterial({
       transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false,
-      uniforms: { uTime: { value: 0 }, uColor: { value: new THREE.Color(0x6fd6ff) }, uScale: { value: 300 } },
+      uniforms: { uTime: { value: 0 }, uColor: { value: new THREE.Color(0xe6c48f) }, uScale: { value: 300 } },
       vertexShader: /* glsl */`
         attribute float aSeed;
         uniform float uTime; uniform float uScale;
@@ -296,17 +318,13 @@ export class World {
     u.uCoreGlow.value = coreGlow;
     if (playerPos) u.uPlayerPos.value.copy(playerPos);
 
-    this.stabCrystal.rotation.y += dt * 0.35;
-    this.stabCrystal.position.y = 6.4 + Math.sin(this.time * 0.9) * 0.32;
-    this.stabRingA.rotation.y += dt * 0.7;
-    this.stabRingA.rotation.x = Math.sin(this.time * 0.4) * 0.35;
-    this.stabRingB.rotation.y -= dt * 0.5;
-    this.stabRingB.rotation.z = Math.PI / 3 + Math.cos(this.time * 0.33) * 0.4;
+    // the windmill turns in gusts, not at a constant rate
+    this._vaneSpin = (this._vaneSpin || 0) + dt * (1.6 + Math.sin(this.time * 0.31) * 0.9);
+    this.towerVane.rotation.z = this._vaneSpin;
+    this.towerTank.position.y = 7.3;
 
-    this.islands.rotation.y += dt * 0.006;
     for (const m of this._mistMats) m.uniforms.uTime.value = this.time;
     this._moteMat.uniforms.uTime.value = this.time;
-    this.barrierMat.uniforms.uOpacity.value = 0.055 + this.threat * 0.075 + Math.sin(this.time * 1.7) * 0.015;
   }
 
   /** Reset per-run visual state. */
@@ -325,11 +343,10 @@ export class World {
   dispose() {
     this.sky.geometry.dispose(); this.sky.material.dispose();
     this.floor.geometry.dispose(); this.floorMat.dispose();
-    this.shell.geometry.dispose(); this.shellMat.dispose();
-    this.barrier.geometry.dispose(); this.barrierMat.dispose();
+    this.rim.geometry.dispose(); this.rimMat.dispose();
     this._stabGeos.forEach((g) => g.dispose());
     this._pillarGeos.forEach((g) => g.dispose());
-    this.stabMat.dispose(); this.pillarMat.dispose();
+    this.towerMat.dispose(); this.pillarMat.dispose();
     this.islands.geometry.dispose(); this._islandMat.dispose();
     this.motes.geometry.dispose(); this._moteMat.dispose();
     this._mistGeo.dispose();

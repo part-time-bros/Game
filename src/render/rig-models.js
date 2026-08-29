@@ -24,15 +24,19 @@ function pack(builder, clips, name, extra = {}) {
 // ======================================================================
 //  PLAYER CHASSIS
 // ======================================================================
+// Warm iron and brass rather than cyan energy. The hulls themselves are still
+// the sci-fi chassis — the rider and mount replace them in the cast pass — but
+// the colour they throw into muzzle flash, tracers and the ground ring is what
+// you actually see most of, so it moves first.
 const SHIP_SPEC = {
-  striker: { len: 3.0, wid: 1.05, hei: 0.62, wing: 1.35, sweep: 0.5, nac: 2, glow: PALETTE.cyan },
-  bastion: { len: 2.9, wid: 1.5, hei: 0.86, wing: 1.15, sweep: 0.26, nac: 1, glow: 0x63b4ff },
-  phantom: { len: 3.35, wid: 0.82, hei: 0.5, wing: 1.5, sweep: 0.8, nac: 3, glow: 0xc98bff },
+  striker: { len: 3.0, wid: 1.05, hei: 0.62, wing: 1.35, sweep: 0.5, nac: 2, glow: PALETTE.ember },
+  bastion: { len: 2.9, wid: 1.5, hei: 0.86, wing: 1.15, sweep: 0.26, nac: 1, glow: PALETTE.brass },
+  phantom: { len: 3.35, wid: 0.82, hei: 0.5, wing: 1.5, sweep: 0.8, nac: 3, glow: 0xffd08a },
 };
 
 export function buildRiggedShip(kind = 'striker') {
   const sp = SHIP_SPEC[kind] || SHIP_SPEC.striker;
-  const dark = PALETTE.hullDark, mid = PALETTE.hullMid, lite = PALETTE.hullLite;
+  const dark = PALETTE.ironDark, mid = PALETTE.iron, lite = PALETTE.timber;
   const r = new RigBuilder();
 
   r.addBone('root');
@@ -57,18 +61,18 @@ export function buildRiggedShip(kind = 'striker') {
   for (let i = 0; i < 4; i++) {
     r.part(PRIM.box(), { bone: 'hull', pos: [0, sp.hei * 0.5, -sp.len * 0.2 + i * 0.42], scale: [sp.wid * 0.5, 0.05, 0.1], color: dark });
   }
-  r.part(PRIM.sph(8, 6), { bone: 'canopy', scale: [sp.wid * 0.44, sp.hei * 0.5, sp.len * 0.3], color: sp.glow, emit: 1.6, flat: false });
+  r.part(PRIM.sph(8, 6), { bone: 'canopy', scale: [sp.wid * 0.44, sp.hei * 0.5, sp.len * 0.3], color: sp.glow, emit: 0.54, flat: false });
   r.part(PRIM.tor(0.5, 0.06, 5, 12), { bone: 'canopy', rot: [Math.PI / 2, 0, 0], scale: sp.wid * 0.95, color: lite, flat: false });
 
   // --- nose lance ---
   r.part(PRIM.cyl(6), { bone: 'nose', rot: [Math.PI / 2, 0, 0], scale: [0.2, 0.55, 0.2], color: PALETTE.hullWhite });
-  r.part(PRIM.cyl(6), { bone: 'nose', pos: [0, 0, -0.2], rot: [Math.PI / 2, 0, 0], scale: [0.12, 0.4, 0.12], color: sp.glow, emit: 2.8 });
-  r.part(PRIM.tor(0.5, 0.09, 5, 10), { bone: 'nose', pos: [0, 0, -0.08], scale: 0.42, color: sp.glow, emit: 2.2, flat: false });
+  r.part(PRIM.cyl(6), { bone: 'nose', pos: [0, 0, -0.2], rot: [Math.PI / 2, 0, 0], scale: [0.12, 0.4, 0.12], color: sp.glow, emit: 0.95 });
+  r.part(PRIM.tor(0.5, 0.09, 5, 10), { bone: 'nose', pos: [0, 0, -0.08], scale: 0.42, color: sp.glow, emit: 0.75, flat: false });
 
   // --- wings ---
   for (const [bone, s] of [['wingL', 1], ['wingR', -1]]) {
     r.part(PRIM.wedge(sp.wing, 0.13, 1.5, 0.55), { bone, pos: [s * sp.wing * 0.42, 0, 0], color: mid });
-    r.part(PRIM.box(), { bone, pos: [s * sp.wing * 0.82, 0.04, 0.1], scale: [0.1, 0.09, 1.1], color: sp.glow, emit: 2.4 });
+    r.part(PRIM.box(), { bone, pos: [s * sp.wing * 0.82, 0.04, 0.1], scale: [0.1, 0.09, 1.1], color: sp.glow, emit: 0.82 });
     r.part(PRIM.wedge(0.1, 0.5, 0.8, 0.4), { bone, pos: [s * sp.wing * 0.94, 0.22, 0.16], rot: [0, 0, s * 0.12], color: lite });
     r.part(PRIM.box(), { bone, pos: [s * sp.wing * 0.55, -0.08, -0.3], scale: [0.24, 0.1, 0.5], color: dark });
     if (kind === 'bastion') {
@@ -81,19 +85,19 @@ export function buildRiggedShip(kind = 'striker') {
   for (const bone of nacelles) {
     const w = sp.nac === 1 ? 0.62 : 0.3;
     r.part(PRIM.cyl(8), { bone, rot: [Math.PI / 2, 0, 0], scale: [w, 0.85, w], color: dark });
-    r.part(PRIM.tor(0.5, 0.12, 6, 12), { bone, pos: [0, 0, 0.16], scale: w * 1.05, color: sp.glow, emit: 3.0, flat: false });
-    r.part(PRIM.cyl(8), { bone, pos: [0, 0, 0.14], rot: [Math.PI / 2, 0, 0], scale: [w * 0.72, 0.16, w * 0.72], color: 0xffffff, emit: 3.4 });
+    r.part(PRIM.tor(0.5, 0.12, 6, 12), { bone, pos: [0, 0, 0.16], scale: w * 1.05, color: sp.glow, emit: 1.02, flat: false });
+    r.part(PRIM.cyl(8), { bone, pos: [0, 0, 0.14], rot: [Math.PI / 2, 0, 0], scale: [w * 0.72, 0.16, w * 0.72], color: 0xffffff, emit: 1.16 });
     r.part(PRIM.box(), { bone, pos: [0, w * 0.75, -0.1], scale: [w * 0.4, 0.08, 0.7], color: lite });
   }
 
   // --- dorsal fin ---
   r.part(PRIM.wedge(0.09, 0.62, 1.1, 0.35), { bone: 'fin', color: lite });
-  r.part(PRIM.box(), { bone: 'fin', pos: [0, 0.17, 0], scale: [0.06, 0.05, 0.9], color: sp.glow, emit: 2.6 });
+  r.part(PRIM.box(), { bone: 'fin', pos: [0, 0.17, 0], scale: [0.06, 0.05, 0.9], color: sp.glow, emit: 0.88 });
 
   // --- hover gear ---
   for (const bone of ['gearL', 'gearR', 'gearBL', 'gearBR']) {
     r.part(PRIM.cyl(6), { bone, scale: [0.3, 0.1, 0.3], color: dark });
-    r.part(PRIM.cyl(6), { bone, pos: [0, -0.09, 0], scale: [0.22, 0.05, 0.22], color: sp.glow, emit: 2.4 });
+    r.part(PRIM.cyl(6), { bone, pos: [0, -0.09, 0], scale: [0.22, 0.05, 0.22], color: sp.glow, emit: 0.82 });
     r.part(PRIM.box(), { bone, pos: [0, 0.06, 0], scale: [0.1, 0.16, 0.1], color: PALETTE.hullWhite });
   }
 
