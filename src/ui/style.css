@@ -71,6 +71,15 @@ body.playing canvas#scene{cursor:none;}
 }
 body.no-scanlines #scanlines{display:none;}
 
+/* Cinematic letterbox: bars are driven from the director, not CSS timing. */
+#letterbox{position:absolute;inset:0;z-index:11;pointer-events:none;}
+#letterbox i{
+  position:absolute;left:0;right:0;height:calc(var(--lb, 0) * 11vh);
+  background:#04050c;display:block;
+}
+#letterbox i:first-child{top:0;box-shadow:0 1px 0 rgba(70,230,255,.18);}
+#letterbox i:last-child{bottom:0;box-shadow:0 -1px 0 rgba(70,230,255,.18);}
+
 /* ---------- shared controls ---------- */
 .btn{
   position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:2px;
@@ -297,7 +306,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;background:var(--cyan
 .hud-combo-bar i{display:block;height:100%;width:0;background:var(--amber);box-shadow:0 0 10px var(--amber);}
 
 #boss-bar{
-  position:absolute;top:clamp(60px,8.5vh,92px);left:50%;transform:translateX(-50%);
+  position:absolute;top:clamp(8px,1.6vh,18px);left:50%;transform:translateX(-50%);
   width:min(560px,80vw);text-align:center;padding:8px 16px 9px;
   background:linear-gradient(180deg,rgba(6,8,18,.82),rgba(6,8,18,.45));
   clip-path:polygon(14px 0,calc(100% - 14px) 0,100% 100%,0 100%);
@@ -443,7 +452,7 @@ body.touch .power .bar{flex:0 0 11px;}
 body.touch .dash-charges{height:7px;}
 body.touch .dash-pip{width:22px;height:7px;}
 body.touch .tbtn.pause{left:50%;right:auto;transform:translateX(-50%);}
-body.touch #boss-bar{top:clamp(112px,19vh,140px);}
+body.touch #boss-bar{top:clamp(46px,8vh,64px);}
 body.touch #toast-stack{top:clamp(112px,19vh,140px);}
 body.touch #banner{top:30%;}
 .touch-btns{

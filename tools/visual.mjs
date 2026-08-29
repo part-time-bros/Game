@@ -139,6 +139,22 @@ const SCENES = {
     N.setInput({ fire:true, aim:{x:1,z:0}, move:{x:0.4,z:0.2} }); N.step(1/60,90);
     N.clearInput();
   `,
+  cine_start: `
+    N.setCamera(null);
+    N.start('striker','pilot','campaign',5);
+    N.step(1/60, 78);
+  `,
+  cine_boss: `
+    N.setCamera(null);
+    const g = N.game;
+    N.start('striker','pilot','campaign',5);
+    N.step(1/60, 40); N.skipCinematic(); N.step(1/60, 10);
+    g.waves.clear(); g.enemies.clear(); g.timers.length = 0;
+    g.waves.start(5);
+    // run to just past the boss reveal beat
+    for (let i=0;i<200 && !g.director.running;i++) N.step(1/60);
+    N.step(1/60, 55);
+  `,
   warden: `
     N.setCamera(null);
     N.start('striker','pilot','campaign',3); N.step(1/60,60);
@@ -199,8 +215,11 @@ async function main() {
   for (const name of list) {
     const code = SCENES[name];
     if (!code) { console.log(`  ? unknown scene ${name}`); continue; }
+    await page.evaluate(() => window.__NOVA.freeze(false));
     await page.evaluate(new Function('N', code), await page.evaluateHandle(() => window.__NOVA));
-    await page.evaluate(() => window.__NOVA.render());
+    // Freeze before capturing: otherwise the rAF loop keeps advancing the sim
+    // (and any running cinematic) between setup and the screenshot.
+    await page.evaluate(() => { window.__NOVA.freeze(true); window.__NOVA.render(); });
     await page.screenshot({ path: join(OUT, `${name}.png`), animations: 'disabled' });
     console.log(`  ✓ ${name}.png`);
   }

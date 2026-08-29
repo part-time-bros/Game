@@ -12,6 +12,7 @@ import { ENEMY_TYPES } from '../entities/enemies.js';
 import { createNovaMaterial, createRingMaterial } from '../render/materials.js';
 import { buildRiftFrame } from '../render/models.js';
 import { riftTexture } from '../render/textures.js';
+import { bossIntroSequence } from './director.js';
 import { Pool } from '../core/util.js';
 
 const UNLOCKS = [
@@ -319,7 +320,10 @@ export class WaveDirector {
     const g = this.game;
     const kind = this.bossKindFor(this.wave);
     const cycle = Math.max(0, Math.floor((this.wave - 1) / 15));
-    g.boss.spawn(kind, 1 + cycle * 0.7 + (this.wave > 15 ? (this.wave - 15) * 0.035 : 0));
+    const boss = g.boss.spawn(kind, 1 + cycle * 0.7 + (this.wave > 15 ? (this.wave - 15) * 0.035 : 0));
+    if (boss && g.director) {
+      g.director.play(bossIntroSequence(boss, g.player.position.x, g.player.position.z));
+    }
   }
 
   _clear() {

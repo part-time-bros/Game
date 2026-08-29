@@ -9,7 +9,7 @@
  *   node tools/build.js
  *   -> dist/nova-lance.html   (three.js from cdnjs, everything else inline)
  */
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 const ROOT = resolve(new URL('..', import.meta.url).pathname);
@@ -22,8 +22,10 @@ const ORDER = [
   'src/core/audio.js',
   'src/core/input.js',
   'src/render/textures.js',
+  'src/render/rig.js',
   'src/render/materials.js',
   'src/render/models.js',
+  'src/render/rig-models.js',
   'src/render/renderer.js',
   'src/render/camera.js',
   'src/render/particles.js',
@@ -36,6 +38,7 @@ const ORDER = [
   'src/entities/player.js',
   'src/entities/pickups.js',
   'src/entities/bosses.js',
+  'src/systems/director.js',
   'src/systems/waves.js',
   'src/ui/ui.js',
   'src/game.js',
@@ -108,7 +111,26 @@ function buildArtifact(chunks, css, html) {
   return outPath;
 }
 
+/** Every module under src/ must appear in ORDER, or the bundle ships broken. */
+function assertComplete() {
+  const found = [];
+  (function walk(dir) {
+    for (const entry of readdirSync(join(ROOT, dir))) {
+      const rel = `${dir}/${entry}`;
+      if (statSync(join(ROOT, rel)).isDirectory()) walk(rel);
+      else if (rel.endsWith('.js')) found.push(rel);
+    }
+  })('src');
+  const missing = found.filter((f) => !ORDER.includes(f));
+  if (missing.length) {
+    throw new Error(`module(s) missing from the bundle order: ${missing.join(', ')}`);
+  }
+  const stale = ORDER.filter((f) => !found.includes(f));
+  if (stale.length) throw new Error(`bundle order lists missing file(s): ${stale.join(', ')}`);
+}
+
 function build() {
+  assertComplete();
   const seen = new Map();
   const chunks = [];
   for (const rel of ORDER) {

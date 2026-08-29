@@ -24,6 +24,7 @@ import { WaveDirector } from './systems/waves.js';
 import { draftModules, MODULES } from './systems/upgrades.js';
 import { SHIPS, DIFFICULTIES, MODES } from './systems/ships.js';
 import { UI } from './ui/ui.js';
+import { Director, runStartSequence, bossIntroSequence, victorySequence, defeatSequence } from './systems/director.js';
 
 const MAX_DT = 1 / 20;
 
@@ -117,6 +118,7 @@ export class Game {
 
     await step(0.92, 'tuning the arrays', () => {
       this.waves = new WaveDirector(this, this.scene);
+      this.director = new Director(this);
       this.applySettings();
       this._bindWindow();
       this.ui.setLoadout(save.record.lastShip, save.record.lastDifficulty, save.record.lastMode);
@@ -230,6 +232,7 @@ export class Game {
   }
 
   _teardownRun() {
+    if (this.director) this.director.cancel();
     if (!this.enemies) return;
     this.enemies.clear();
     this.projectiles.clear();
@@ -286,7 +289,12 @@ export class Game {
     this.audio.setMusicMode('combat');
     this.input.lock(0.3);
 
-    this.after(1.0, () => this.waves.start(1));
+    this.director.cancel();
+    this.director.play(runStartSequence(this.player.position.x, this.player.position.z), () => {
+      // Guard: a wave may already have been forced to start (debug tooling, or
+      // a skip that raced the callback). Never rewind it to wave 1.
+      if (this.state === 'playing' && this.waves.wave === 0) this.waves.start(1);
+    });
     this._startTutorial();
   }
 
@@ -344,6 +352,7 @@ export class Game {
     if (this.state !== 'playing') return;
     this.state = 'paused';
     this.paused = true;
+    this.director.cancel();
     this.ui.showPauseStats();
     this.ui.show('pause');
     this.audio.duck(0.5, 0.3);
@@ -365,7 +374,7 @@ export class Game {
     this.audio.setIntensity(0);
     this.audio.play('defeat');
     this.screen.desaturate = 0.85;
-    this.after(2.4, () => this.endRun(false));
+    this.director.play(defeatSequence(this.player.position.x, this.player.position.z), () => this.endRun(false));
   }
 
   onBossDefeated(boss) {
@@ -392,7 +401,10 @@ export class Game {
     this.player.heal(this.player.stats.maxHull * 0.06);
 
     if (isFinal) {
-      this.after(2.0, () => this.endRun(true));
+      this.after(0.8, () => {
+        if (this.state !== 'playing') return;
+        this.director.play(victorySequence(this.player.position.x, this.player.position.z), () => this.endRun(true));
+      });
       return;
     }
     this.after(1.7, () => this.openRefit(wave));
@@ -707,7 +719,17 @@ export class Game {
     if (dtReal > MAX_DT) dtReal = MAX_DT;
     this.frame++;
     this.screen.update(dtReal);
+    if (this.director) {
+      this.director.update(dtReal);
+      this.input.enabled = !this.director.lockInput;
+    }
     this.input.sample(dtReal);
+    if (this.director && this.director.running) {
+      // any deliberate input skips an intro — unskippable cutscenes age badly
+      const wants = this.input.anyEdge || this.input.fireHeld
+        || this.input.move.x !== 0 || this.input.move.z !== 0;
+      if (wants) this.director.trySkip();
+    }
     this._handleGlobalKeys();
 
     const dt = dtReal * this.screen.timeScale;
@@ -818,6 +840,10 @@ export class Game {
       const c = this.camera.camera;
       c.position.set(this.debugCamera.x, this.debugCamera.y, this.debugCamera.z);
       c.lookAt(this.debugCamera.tx, this.debugCamera.ty, this.debugCamera.tz);
+    } else if (this.director.running) {
+      // park the rig first, then apply — parking must not move the camera
+      this.camera.parkTarget(p.position.x, p.position.z);
+      this.director.applyTo(this.camera.camera);
     } else {
       this.camera.follow(p, this._aimWorld, dtReal, this.screen, this.boss.active ? 0.7 : 0,
         this.boss.active ? this.boss : null);
@@ -949,6 +975,8 @@ export class Game {
       render: () => g.render(),
       setWave: (n) => {
         g.waves.clear(); g.enemies.clear(); g.projectiles.clear(); g.boss.despawn(true);
+        g.director.cancel();
+        g.input.enabled = true;
         g.timers.length = 0;
         g.state = 'playing';
         g.ui.hideAll();
@@ -966,6 +994,7 @@ export class Game {
       setInput: (o) => { g.input.override = o; },
       setCamera: (c) => { g.debugCamera = c; },
       freeze: (on = true) => { g.debugFreeze = !!on; },
+      skipCinematic: () => { g.director.cancel(); g.input.enabled = true; },
       clearInput: () => { g.input.override = null; },
       errors: [],
     };

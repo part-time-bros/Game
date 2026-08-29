@@ -89,6 +89,15 @@ body.playing canvas#scene{cursor:none;}
 }
 body.no-scanlines #scanlines{display:none;}
 
+/* Cinematic letterbox: bars are driven from the director, not CSS timing. */
+#letterbox{position:absolute;inset:0;z-index:11;pointer-events:none;}
+#letterbox i{
+  position:absolute;left:0;right:0;height:calc(var(--lb, 0) * 11vh);
+  background:#04050c;display:block;
+}
+#letterbox i:first-child{top:0;box-shadow:0 1px 0 rgba(70,230,255,.18);}
+#letterbox i:last-child{bottom:0;box-shadow:0 -1px 0 rgba(70,230,255,.18);}
+
 /* ---------- shared controls ---------- */
 .btn{
   position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:2px;
@@ -315,7 +324,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;background:var(--cyan
 .hud-combo-bar i{display:block;height:100%;width:0;background:var(--amber);box-shadow:0 0 10px var(--amber);}
 
 #boss-bar{
-  position:absolute;top:clamp(60px,8.5vh,92px);left:50%;transform:translateX(-50%);
+  position:absolute;top:clamp(8px,1.6vh,18px);left:50%;transform:translateX(-50%);
   width:min(560px,80vw);text-align:center;padding:8px 16px 9px;
   background:linear-gradient(180deg,rgba(6,8,18,.82),rgba(6,8,18,.45));
   clip-path:polygon(14px 0,calc(100% - 14px) 0,100% 100%,0 100%);
@@ -461,7 +470,7 @@ body.touch .power .bar{flex:0 0 11px;}
 body.touch .dash-charges{height:7px;}
 body.touch .dash-pip{width:22px;height:7px;}
 body.touch .tbtn.pause{left:50%;right:auto;transform:translateX(-50%);}
-body.touch #boss-bar{top:clamp(112px,19vh,140px);}
+body.touch #boss-bar{top:clamp(46px,8vh,64px);}
 body.touch #toast-stack{top:clamp(112px,19vh,140px);}
 body.touch #banner{top:30%;}
 .touch-btns{
@@ -508,6 +517,7 @@ body.no-flash #damage-flash,body.no-flash #overdrive-tint{display:none;}
   <div id="damage-flash"></div>
   <div id="overdrive-tint"></div>
   <div id="scanlines"></div>
+  <div id="letterbox"><i></i><i></i></div>
 
   <!-- ============ HUD ============ -->
   <div id="hud" class="layer" hidden>
@@ -2232,6 +2242,382 @@ function disposeTextures() {
 const textureCache = cache;
 
 
+// ===== src/render/rig.js ===========================================
+/**
+ * rig.js — skeletal animation for hard-surface models.
+ *
+ * three.js's own skinning path needs GLSL3 texelFetch, which would force the
+ * whole shader family to ES 3.00. These models are robots: every vertex belongs
+ * to exactly one bone, so a leaner rigid-bind skin does the job — a single
+ * `aBone` attribute plus a small mat4 uniform array. That keeps one draw call
+ * per entity, works in GLSL1, and costs one matrix multiply per vertex.
+ *
+ * Authoring model:
+ *   - bones are declared parent-first with a bind transform
+ *   - parts are authored in their OWN bone's local space
+ *   - so the shader is just `uBones[aBone] * position` — no inverse bind needed
+ *
+ * On top sits a small animation system: clips with position/rotation/scale
+ * tracks, crossfading, one-shot clips with callbacks, playback speed, and
+ * procedural overlays (aim tracking, recoil) applied after clip evaluation.
+ */
+
+const MAX_BONES = 18;
+
+/** Builds a bone hierarchy + a skinned geometry in one pass. */
+class RigBuilder {
+  constructor() {
+    this.bones = [];
+    this.index = new Map();
+    this.pos = [];
+    this.nrm = [];
+    this.col = [];
+    this.emi = [];
+    this.bone = [];
+    this._m = new THREE.Matrix4();
+    this._q = new THREE.Quaternion();
+    this._e = new THREE.Euler();
+    this._v = new THREE.Vector3();
+    this._s = new THREE.Vector3();
+    this._c = new THREE.Color();
+  }
+
+  /** bone(name, parent, pos, rot) — parents must be declared first. */
+  addBone(name, parent = null, pos = [0, 0, 0], rot = [0, 0, 0]) {
+    if (this.index.has(name)) throw new Error(`rig: duplicate bone "${name}"`);
+    const parentIndex = parent === null ? -1 : this.index.get(parent);
+    if (parent !== null && parentIndex === undefined) throw new Error(`rig: unknown parent "${parent}"`);
+    const i = this.bones.length;
+    this.index.set(name, i);
+    this.bones.push({ name, parent: parentIndex, pos: pos.slice(), rot: rot.slice() });
+    if (this.bones.length > MAX_BONES) throw new Error(`rig: over ${MAX_BONES} bones`);
+    return i;
+  }
+
+  /**
+   * part(geometry, { bone, pos, rot, scale, color, emit, flat })
+   * pos/rot/scale are relative to the bone's own space.
+   */
+  part(geo, o = {}) {
+    const boneName = o.bone === undefined ? this.bones[0].name : o.bone;
+    const boneIndex = this.index.get(boneName);
+    if (boneIndex === undefined) throw new Error(`rig: part references unknown bone "${boneName}"`);
+
+    let g = geo.index ? geo.toNonIndexed() : geo.clone();
+    const p = o.pos || [0, 0, 0];
+    const r = o.rot || [0, 0, 0];
+    let s = o.scale === undefined ? 1 : o.scale;
+    if (typeof s === 'number') s = [s, s, s];
+    this._e.set(r[0], r[1], r[2]);
+    this._q.setFromEuler(this._e);
+    this._v.set(p[0], p[1], p[2]);
+    this._s.set(s[0], s[1], s[2]);
+    this._m.compose(this._v, this._q, this._s);
+    g.applyMatrix4(this._m);
+    if (o.flat !== false) g.computeVertexNormals();
+
+    const posAttr = g.getAttribute('position');
+    const nrmAttr = g.getAttribute('normal');
+    this._c.set(o.color === undefined ? 0xffffff : o.color);
+    const emit = o.emit === undefined ? 0 : o.emit;
+    for (let i = 0; i < posAttr.count; i++) {
+      this.pos.push(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i));
+      this.nrm.push(nrmAttr.getX(i), nrmAttr.getY(i), nrmAttr.getZ(i));
+      this.col.push(this._c.r, this._c.g, this._c.b);
+      this.emi.push(emit);
+      this.bone.push(boneIndex);
+    }
+    g.dispose();
+    return this;
+  }
+
+  /** Mirror a part across X onto a second bone (limbs, wings, nacelles). */
+  partMirrored(geo, o = {}, mirrorBone) {
+    this.part(geo, o);
+    const p = (o.pos || [0, 0, 0]).slice();
+    const r = (o.rot || [0, 0, 0]).slice();
+    p[0] = -p[0]; r[1] = -r[1]; r[2] = -r[2];
+    this.part(geo, { ...o, pos: p, rot: r, bone: mirrorBone || o.bone });
+    return this;
+  }
+
+  build(name = 'rig') {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(this.pos, 3));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(this.nrm, 3));
+    g.setAttribute('aColor', new THREE.Float32BufferAttribute(this.col, 3));
+    g.setAttribute('aEmit', new THREE.Float32BufferAttribute(this.emi, 1));
+    g.setAttribute('aBone', new THREE.Float32BufferAttribute(this.bone, 1));
+    g.name = name;
+    // The bind pose is not the animated pose, so bounds are computed generously.
+    g.computeBoundingSphere();
+    if (g.boundingSphere) g.boundingSphere.radius *= 1.9;
+    g.computeBoundingBox();
+    return { geometry: g, skeleton: new Skeleton(this.bones, name) };
+  }
+}
+
+/** Shared, immutable description of a bone hierarchy. */
+class Skeleton {
+  constructor(bones, name = 'skeleton') {
+    this.name = name;
+    this.bones = bones;
+    this.count = bones.length;
+    this.index = new Map();
+    bones.forEach((b, i) => this.index.set(b.name, i));
+    // flat bind pose arrays: 3 floats each for position / euler / scale
+    this.bindPos = new Float32Array(this.count * 3);
+    this.bindRot = new Float32Array(this.count * 3);
+    this.bindScale = new Float32Array(this.count * 3);
+    bones.forEach((b, i) => {
+      this.bindPos.set(b.pos, i * 3);
+      this.bindRot.set(b.rot, i * 3);
+      this.bindScale.set([1, 1, 1], i * 3);
+    });
+  }
+  boneIndex(name) { return this.index.has(name) ? this.index.get(name) : -1; }
+}
+
+const _mat = new THREE.Matrix4();
+const _q = new THREE.Quaternion();
+const _e = new THREE.Euler();
+const _v = new THREE.Vector3();
+const _s = new THREE.Vector3();
+
+/**
+ * A live pose for one entity: local TRS per bone, resolved into the flat
+ * matrix array the shader reads.
+ */
+class Pose {
+  constructor(skeleton) {
+    this.skeleton = skeleton;
+    const n = skeleton.count;
+    this.pos = new Float32Array(skeleton.bindPos);
+    this.rot = new Float32Array(skeleton.bindRot);
+    this.scale = new Float32Array(skeleton.bindScale);
+    this.matrices = new Array(n);
+    for (let i = 0; i < n; i++) this.matrices[i] = new THREE.Matrix4();
+    // padded so every material can declare the same array length
+    this.uniform = new Array(MAX_BONES);
+    for (let i = 0; i < MAX_BONES; i++) this.uniform[i] = i < n ? this.matrices[i] : new THREE.Matrix4();
+  }
+
+  resetToBind() {
+    this.pos.set(this.skeleton.bindPos);
+    this.rot.set(this.skeleton.bindRot);
+    this.scale.set(this.skeleton.bindScale);
+  }
+
+  /** Resolve local transforms into world (model-space) matrices. */
+  update() {
+    const sk = this.skeleton;
+    for (let i = 0; i < sk.count; i++) {
+      const i3 = i * 3;
+      _v.set(this.pos[i3], this.pos[i3 + 1], this.pos[i3 + 2]);
+      _e.set(this.rot[i3], this.rot[i3 + 1], this.rot[i3 + 2]);
+      _q.setFromEuler(_e);
+      _s.set(this.scale[i3], this.scale[i3 + 1], this.scale[i3 + 2]);
+      _mat.compose(_v, _q, _s);
+      const parent = sk.bones[i].parent;
+      if (parent < 0) this.matrices[i].copy(_mat);
+      else this.matrices[i].multiplyMatrices(this.matrices[parent], _mat);
+    }
+  }
+}
+
+/**
+ * Clip authoring helper.
+ *
+ * track(bone, channel, keys) where keys is [[time, x, y, z], ...]; values are
+ * OFFSETS from the bind pose for rotation and position, and absolute for scale.
+ */
+class Clip {
+  constructor(name, duration, opts = {}) {
+    this.name = name;
+    this.duration = duration;
+    this.loop = opts.loop !== false;
+    this.tracks = [];
+  }
+  track(bone, channel, keys) {
+    this.tracks.push({ bone, channel, keys, boneIndex: -1 });
+    return this;
+  }
+  /** Convenience: a symmetric swing on one axis. */
+  swing(bone, axis, amount, phase = 0, channel = 'rot') {
+    const a = ['x', 'y', 'z'].indexOf(axis);
+    const keys = [];
+    for (let i = 0; i <= 4; i++) {
+      const t = (i / 4) * this.duration;
+      const v = Math.sin((i / 4 + phase) * TAU) * amount;
+      const k = [t, 0, 0, 0];
+      k[a + 1] = v;
+      keys.push(k);
+    }
+    return this.track(bone, channel, keys);
+  }
+  compile(skeleton) {
+    for (const t of this.tracks) t.boneIndex = skeleton.boneIndex(t.bone);
+    this.tracks = this.tracks.filter((t) => t.boneIndex >= 0);
+    return this;
+  }
+}
+
+function sampleTrack(track, time) {
+  const keys = track.keys;
+  const n = keys.length;
+  if (n === 1) return keys[0];
+  let i = 0;
+  while (i < n - 1 && keys[i + 1][0] <= time) i++;
+  if (i >= n - 1) return keys[n - 1];
+  const a = keys[i], b = keys[i + 1];
+  const span = b[0] - a[0];
+  const t = span > 0 ? clamp01((time - a[0]) / span) : 0;
+  // smoothstep between keys: linear joints read as robotic in a bad way
+  const k = t * t * (3 - 2 * t);
+  _sampleWrap[1] = lerp(a[1], b[1], k);
+  _sampleWrap[2] = lerp(a[2], b[2], k);
+  _sampleWrap[3] = lerp(a[3], b[3], k);
+  return _sampleWrap;
+}
+// one reusable key tuple: sampling runs thousands of times per frame
+const _sampleWrap = [0, 0, 0, 0];
+
+/**
+ * Plays clips onto a Pose with crossfading, then lets gameplay layer
+ * procedural offsets (aim tracking, recoil kicks) on top.
+ */
+class Animator {
+  constructor(pose, clips) {
+    this.pose = pose;
+    this.clips = clips;
+    this.current = null;
+    this.previous = null;
+    this.time = 0;
+    this.prevTime = 0;
+    this.fade = 1;
+    this.fadeSpeed = 0;
+    this.speed = 1;
+    this.onEnd = null;
+    this.finished = false;
+    const n = pose.skeleton.count * 3;
+    this._posA = new Float32Array(n);
+    this._rotA = new Float32Array(n);
+    this._sclA = new Float32Array(n);
+    this._posB = new Float32Array(n);
+    this._rotB = new Float32Array(n);
+    this._sclB = new Float32Array(n);
+    this._overlayRot = new Float32Array(n);
+    this._overlayPos = new Float32Array(n);
+  }
+
+  play(name, opts = {}) {
+    const clip = this.clips[name];
+    if (!clip || (this.current === clip && !opts.restart)) return this;
+    this.previous = this.current;
+    this.prevTime = this.time;
+    this.current = clip;
+    this.time = opts.at || 0;
+    this.speed = opts.speed === undefined ? 1 : opts.speed;
+    this.onEnd = opts.onEnd || null;
+    this.finished = false;
+    const fade = opts.fade === undefined ? 0.16 : opts.fade;
+    this.fade = this.previous && fade > 0 ? 0 : 1;
+    this.fadeSpeed = fade > 0 ? 1 / fade : 0;
+    return this;
+  }
+
+  get playing() { return this.current ? this.current.name : null; }
+
+  /** Additive offset applied after clip evaluation; cleared every update. */
+  offsetRot(boneName, x, y, z) {
+    const i = this.pose.skeleton.boneIndex(boneName);
+    if (i < 0) return;
+    const i3 = i * 3;
+    this._overlayRot[i3] += x; this._overlayRot[i3 + 1] += y; this._overlayRot[i3 + 2] += z;
+  }
+  offsetPos(boneName, x, y, z) {
+    const i = this.pose.skeleton.boneIndex(boneName);
+    if (i < 0) return;
+    const i3 = i * 3;
+    this._overlayPos[i3] += x; this._overlayPos[i3 + 1] += y; this._overlayPos[i3 + 2] += z;
+  }
+
+  _evaluate(clip, time, outPos, outRot, outScl) {
+    const sk = this.pose.skeleton;
+    outPos.set(sk.bindPos);
+    outRot.set(sk.bindRot);
+    outScl.set(sk.bindScale);
+    if (!clip) return;
+    const t = clip.loop ? (clip.duration > 0 ? time % clip.duration : 0) : Math.min(time, clip.duration);
+    for (const track of clip.tracks) {
+      const k = sampleTrack(track, t);
+      const i3 = track.boneIndex * 3;
+      if (track.channel === 'rot') {
+        outRot[i3] += k[1]; outRot[i3 + 1] += k[2]; outRot[i3 + 2] += k[3];
+      } else if (track.channel === 'pos') {
+        outPos[i3] += k[1]; outPos[i3 + 1] += k[2]; outPos[i3 + 2] += k[3];
+      } else {
+        outScl[i3] = k[1]; outScl[i3 + 1] = k[2]; outScl[i3 + 2] = k[3];
+      }
+    }
+  }
+
+  update(dt) {
+    const pose = this.pose;
+    this.time += dt * this.speed;
+    if (this.current && !this.current.loop && !this.finished && this.time >= this.current.duration) {
+      this.finished = true;
+      if (this.onEnd) { const cb = this.onEnd; this.onEnd = null; cb(); }
+    }
+    if (this.fade < 1) {
+      this.fade = clamp01(this.fade + dt * this.fadeSpeed);
+      this.prevTime += dt;
+    }
+
+    this._evaluate(this.current, this.time, this._posA, this._rotA, this._sclA);
+    if (this.fade < 1 && this.previous) {
+      this._evaluate(this.previous, this.prevTime, this._posB, this._rotB, this._sclB);
+      const w = this.fade;
+      for (let i = 0; i < this._posA.length; i++) {
+        pose.pos[i] = lerp(this._posB[i], this._posA[i], w) + this._overlayPos[i];
+        pose.rot[i] = lerp(this._rotB[i], this._rotA[i], w) + this._overlayRot[i];
+        pose.scale[i] = lerp(this._sclB[i], this._sclA[i], w);
+      }
+    } else {
+      if (this.fade >= 1) this.previous = null;
+      for (let i = 0; i < this._posA.length; i++) {
+        pose.pos[i] = this._posA[i] + this._overlayPos[i];
+        pose.rot[i] = this._rotA[i] + this._overlayRot[i];
+        pose.scale[i] = this._sclA[i];
+      }
+    }
+    this._overlayRot.fill(0);
+    this._overlayPos.fill(0);
+    pose.update();
+  }
+
+  reset() {
+    this.current = null;
+    this.previous = null;
+    this.time = 0;
+    this.fade = 1;
+    this.finished = false;
+    this.onEnd = null;
+    this._overlayRot.fill(0);
+    this._overlayPos.fill(0);
+    this.pose.resetToBind();
+    this.pose.update();
+  }
+}
+
+/** Compile a set of clip definitions against a skeleton once, at load. */
+function compileClips(skeleton, clips) {
+  const out = {};
+  for (const name in clips) out[name] = clips[name].compile(skeleton);
+  return out;
+}
+
+
 // ===== src/render/materials.js =====================================
 /**
  * materials.js — the game's whole look lives here.
@@ -2262,6 +2648,12 @@ const NOVA_VERT = /* glsl */`
   attribute vec3 aColor;
   attribute float aEmit;
   uniform float uTime;
+  #ifdef RIGGED
+    // Rigid bind: one bone per vertex, authored in that bone's local space,
+    // so the pose is a single matrix multiply with no inverse-bind term.
+    attribute float aBone;
+    uniform mat4 uBones[MAX_BONES];
+  #endif
   varying vec3 vColor;
   varying float vEmit;
   varying vec3 vNormal;
@@ -2273,6 +2665,11 @@ const NOVA_VERT = /* glsl */`
     vEmit = aEmit;
     vec3 pos = position;
     vec3 nrm = normal;
+    #ifdef RIGGED
+      mat4 boneMat = uBones[int(aBone)];
+      pos = (boneMat * vec4(pos, 1.0)).xyz;
+      nrm = mat3(boneMat) * nrm;
+    #endif
     // InstancedMesh support: three declares instanceMatrix for us, but this
     // shader does its own space transforms so it has to fold it in by hand.
     #ifdef USE_INSTANCING
@@ -2360,11 +2757,15 @@ const NOVA_FRAG = /* glsl */`
   }
 `;
 
-/** Standard lit surface used by every ship, enemy and prop. */
+/**
+ * Standard lit surface used by every ship, enemy and prop.
+ * Pass `pose` (a rig Pose) to compile the skinned variant for this material.
+ */
 function createNovaMaterial(opts = {}) {
   const m = new THREE.ShaderMaterial({
     vertexShader: NOVA_VERT,
     fragmentShader: NOVA_FRAG,
+    defines: opts.pose ? { RIGGED: '', MAX_BONES: RIG_MAX_BONES } : {},
     transparent: !!opts.transparent,
     depthWrite: opts.depthWrite !== undefined ? opts.depthWrite : true,
     side: opts.side || THREE.FrontSide,
@@ -2391,6 +2792,7 @@ function createNovaMaterial(opts = {}) {
       uSpec: { value: opts.spec !== undefined ? opts.spec : 0.35 },
       uFogAmount: { value: opts.fog !== undefined ? opts.fog : 1 },
       uDissolve: { value: 0 },
+      uBones: { value: opts.pose ? opts.pose.uniform : null },
     },
   });
   m.name = opts.name || 'nova';
@@ -2866,6 +3268,13 @@ const tet = () => prim('tet', () => new THREE.TetrahedronGeometry(0.5));
 const tor = (r, t, rs, ts) => prim(`tor${r}_${t}_${rs}_${ts}`, () => new THREE.TorusGeometry(r, t, rs, ts));
 const tap = (rt, rb, seg) => prim(`tap${rt}_${rb}_${seg}`, () => new THREE.CylinderGeometry(rt, rb, 1, seg, 1));
 
+/** Shared primitive factory, also used by the rigged models in rig-models.js. */
+const PRIM = {
+  box, cyl, cone, sph, ico, oct, tet, tor, tap,
+  wedge: (w, h, l, n) => wedgeGeometry(w, h, l, n),
+  spike: (len, base, sides) => spikeGeometry(len, base, sides),
+};
+
 /** Wedge/prism used all over the ship hulls (a box with a tapered nose). */
 function wedgeGeometry(w, h, l, noseScale = 0.25) {
   const hw = w / 2, hh = h / 2, hl = l / 2, n = noseScale;
@@ -3292,6 +3701,782 @@ function buildRiftFrame() {
   }
   return { geometry: b.build('rift-frame'), radius: 2.6 };
 }
+
+
+// ===== src/render/rig-models.js ====================================
+/**
+ * rig-models.js — the animated cast.
+ *
+ * Every model here is a bone hierarchy plus authored clips: legs that actually
+ * step, wings that fold on a dash, barrels that recoil, jaws that open. Parts
+ * are authored in their own bone's local space (see rig.js), so a leg is just
+ * "a box hanging below the hip bone" and the animation does the rest.
+ *
+ * Bone budget is 18; every rig here fits comfortably under it.
+ */
+
+/** Build once, share the geometry + skeleton + compiled clips across instances. */
+function pack(builder, clips, name, extra = {}) {
+  const { geometry, skeleton } = builder.build(name);
+  return { geometry, skeleton, clips: compileClips(skeleton, clips), ...extra };
+}
+
+// ======================================================================
+//  PLAYER CHASSIS
+// ======================================================================
+const SHIP_SPEC = {
+  striker: { len: 3.0, wid: 1.05, hei: 0.62, wing: 1.35, sweep: 0.5, nac: 2, glow: PALETTE.cyan },
+  bastion: { len: 2.9, wid: 1.5, hei: 0.86, wing: 1.15, sweep: 0.26, nac: 1, glow: 0x63b4ff },
+  phantom: { len: 3.35, wid: 0.82, hei: 0.5, wing: 1.5, sweep: 0.8, nac: 3, glow: 0xc98bff },
+};
+
+function buildRiggedShip(kind = 'striker') {
+  const sp = SHIP_SPEC[kind] || SHIP_SPEC.striker;
+  const dark = PALETTE.hullDark, mid = PALETTE.hullMid, lite = PALETTE.hullLite;
+  const r = new RigBuilder();
+
+  r.addBone('root');
+  r.addBone('hull', 'root');
+  r.addBone('nose', 'hull', [0, 0, -sp.len * 0.52]);
+  r.addBone('canopy', 'hull', [0, sp.hei * 0.55, -sp.len * 0.16]);
+  r.addBone('wingL', 'hull', [sp.wid * 0.5, -0.02, sp.len * 0.06], [0, -sp.sweep * 0.55, -0.16]);
+  r.addBone('wingR', 'hull', [-sp.wid * 0.5, -0.02, sp.len * 0.06], [0, sp.sweep * 0.55, 0.16]);
+  r.addBone('nacL', 'hull', [sp.nac === 1 ? 0 : 0.46, 0.02, sp.len * 0.46]);
+  r.addBone('nacR', 'hull', [sp.nac === 1 ? 0 : -0.46, 0.02, sp.len * 0.46]);
+  r.addBone('nacC', 'hull', [0, 0.02, sp.len * 0.5]);
+  r.addBone('fin', 'hull', [0, sp.hei * 0.75, sp.len * 0.3]);
+  r.addBone('gearL', 'hull', [0.58, -sp.hei * 0.5, -0.5]);
+  r.addBone('gearR', 'hull', [-0.58, -sp.hei * 0.5, -0.5]);
+  r.addBone('gearBL', 'hull', [0.62, -sp.hei * 0.5, 0.7]);
+  r.addBone('gearBR', 'hull', [-0.62, -sp.hei * 0.5, 0.7]);
+
+  // --- fuselage ---
+  r.part(PRIM.wedge(sp.wid, sp.hei, sp.len, 0.22), { bone: 'hull', pos: [0, 0, -0.1], color: mid });
+  r.part(PRIM.wedge(sp.wid * 0.72, sp.hei * 0.55, sp.len * 0.55, 0.5), { bone: 'hull', pos: [0, sp.hei * 0.42, -sp.len * 0.1], color: lite });
+  // spine greebles: small hard-surface detail reads as machined at this scale
+  for (let i = 0; i < 4; i++) {
+    r.part(PRIM.box(), { bone: 'hull', pos: [0, sp.hei * 0.5, -sp.len * 0.2 + i * 0.42], scale: [sp.wid * 0.5, 0.05, 0.1], color: dark });
+  }
+  r.part(PRIM.sph(8, 6), { bone: 'canopy', scale: [sp.wid * 0.44, sp.hei * 0.5, sp.len * 0.3], color: sp.glow, emit: 1.6, flat: false });
+  r.part(PRIM.tor(0.5, 0.06, 5, 12), { bone: 'canopy', rot: [Math.PI / 2, 0, 0], scale: sp.wid * 0.95, color: lite, flat: false });
+
+  // --- nose lance ---
+  r.part(PRIM.cyl(6), { bone: 'nose', rot: [Math.PI / 2, 0, 0], scale: [0.2, 0.55, 0.2], color: PALETTE.hullWhite });
+  r.part(PRIM.cyl(6), { bone: 'nose', pos: [0, 0, -0.2], rot: [Math.PI / 2, 0, 0], scale: [0.12, 0.4, 0.12], color: sp.glow, emit: 2.8 });
+  r.part(PRIM.tor(0.5, 0.09, 5, 10), { bone: 'nose', pos: [0, 0, -0.08], scale: 0.42, color: sp.glow, emit: 2.2, flat: false });
+
+  // --- wings ---
+  for (const [bone, s] of [['wingL', 1], ['wingR', -1]]) {
+    r.part(PRIM.wedge(sp.wing, 0.13, 1.5, 0.55), { bone, pos: [s * sp.wing * 0.42, 0, 0], color: mid });
+    r.part(PRIM.box(), { bone, pos: [s * sp.wing * 0.82, 0.04, 0.1], scale: [0.1, 0.09, 1.1], color: sp.glow, emit: 2.4 });
+    r.part(PRIM.wedge(0.1, 0.5, 0.8, 0.4), { bone, pos: [s * sp.wing * 0.94, 0.22, 0.16], rot: [0, 0, s * 0.12], color: lite });
+    r.part(PRIM.box(), { bone, pos: [s * sp.wing * 0.55, -0.08, -0.3], scale: [0.24, 0.1, 0.5], color: dark });
+    if (kind === 'bastion') {
+      r.part(PRIM.wedge(0.34, 0.5, 1.9, 0.6), { bone, pos: [s * 0.2, 0.08, 0], rot: [0, 0, -s * 0.25], color: lite });
+    }
+  }
+
+  // --- engines ---
+  const nacelles = sp.nac === 1 ? ['nacL'] : sp.nac === 2 ? ['nacL', 'nacR'] : ['nacL', 'nacR', 'nacC'];
+  for (const bone of nacelles) {
+    const w = sp.nac === 1 ? 0.62 : 0.3;
+    r.part(PRIM.cyl(8), { bone, rot: [Math.PI / 2, 0, 0], scale: [w, 0.85, w], color: dark });
+    r.part(PRIM.tor(0.5, 0.12, 6, 12), { bone, pos: [0, 0, 0.16], scale: w * 1.05, color: sp.glow, emit: 3.0, flat: false });
+    r.part(PRIM.cyl(8), { bone, pos: [0, 0, 0.14], rot: [Math.PI / 2, 0, 0], scale: [w * 0.72, 0.16, w * 0.72], color: 0xffffff, emit: 3.4 });
+    r.part(PRIM.box(), { bone, pos: [0, w * 0.75, -0.1], scale: [w * 0.4, 0.08, 0.7], color: lite });
+  }
+
+  // --- dorsal fin ---
+  r.part(PRIM.wedge(0.09, 0.62, 1.1, 0.35), { bone: 'fin', color: lite });
+  r.part(PRIM.box(), { bone: 'fin', pos: [0, 0.17, 0], scale: [0.06, 0.05, 0.9], color: sp.glow, emit: 2.6 });
+
+  // --- hover gear ---
+  for (const bone of ['gearL', 'gearR', 'gearBL', 'gearBR']) {
+    r.part(PRIM.cyl(6), { bone, scale: [0.3, 0.1, 0.3], color: dark });
+    r.part(PRIM.cyl(6), { bone, pos: [0, -0.09, 0], scale: [0.22, 0.05, 0.22], color: sp.glow, emit: 2.4 });
+    r.part(PRIM.box(), { bone, pos: [0, 0.06, 0], scale: [0.1, 0.16, 0.1], color: PALETTE.hullWhite });
+  }
+
+  const clips = {
+    idle: (() => {
+      const c = new Clip('idle', 2.6);
+      c.swing('wingL', 'z', 0.05);
+      c.swing('wingR', 'z', -0.05);
+      c.swing('fin', 'x', 0.03, 0.25);
+      c.track('gearL', 'pos', [[0, 0, 0, 0], [1.3, 0, -0.05, 0], [2.6, 0, 0, 0]]);
+      c.track('gearBR', 'pos', [[0, 0, -0.05, 0], [1.3, 0, 0, 0], [2.6, 0, -0.05, 0]]);
+      return c;
+    })(),
+    cruise: (() => {
+      const c = new Clip('cruise', 1.5);
+      c.track('wingL', 'rot', [[0, 0, -0.13, -0.06], [0.75, 0, -0.16, -0.02], [1.5, 0, -0.13, -0.06]]);
+      c.track('wingR', 'rot', [[0, 0, 0.13, 0.06], [0.75, 0, 0.16, 0.02], [1.5, 0, 0.13, 0.06]]);
+      c.track('nacL', 'rot', [[0, 0.05, 0, 0], [0.75, -0.03, 0, 0], [1.5, 0.05, 0, 0]]);
+      c.track('nacR', 'rot', [[0, 0.05, 0, 0], [0.75, -0.03, 0, 0], [1.5, 0.05, 0, 0]]);
+      return c;
+    })(),
+    dash: (() => {
+      const c = new Clip('dash', 0.42, { loop: false });
+      c.track('wingL', 'rot', [[0, 0, 0, 0], [0.1, 0, -0.6, -0.34], [0.42, 0, -0.42, -0.2]]);
+      c.track('wingR', 'rot', [[0, 0, 0, 0], [0.1, 0, 0.6, 0.34], [0.42, 0, 0.42, 0.2]]);
+      c.track('nacL', 'scale', [[0, 1, 1, 1], [0.1, 1.25, 1.25, 1.5], [0.42, 1, 1, 1]]);
+      c.track('nacR', 'scale', [[0, 1, 1, 1], [0.1, 1.25, 1.25, 1.5], [0.42, 1, 1, 1]]);
+      c.track('hull', 'rot', [[0, 0, 0, 0], [0.1, -0.16, 0, 0], [0.42, 0, 0, 0]]);
+      c.track('gearL', 'pos', [[0, 0, 0, 0], [0.12, 0, 0.14, 0], [0.42, 0, 0.14, 0]]);
+      c.track('gearR', 'pos', [[0, 0, 0, 0], [0.12, 0, 0.14, 0], [0.42, 0, 0.14, 0]]);
+      c.track('gearBL', 'pos', [[0, 0, 0, 0], [0.12, 0, 0.14, 0], [0.42, 0, 0.14, 0]]);
+      c.track('gearBR', 'pos', [[0, 0, 0, 0], [0.12, 0, 0.14, 0], [0.42, 0, 0.14, 0]]);
+      return c;
+    })(),
+    overdrive: (() => {
+      const c = new Clip('overdrive', 1.1);
+      c.track('wingL', 'rot', [[0, 0, -0.3, -0.3], [0.55, 0, -0.36, -0.24], [1.1, 0, -0.3, -0.3]]);
+      c.track('wingR', 'rot', [[0, 0, 0.3, 0.3], [0.55, 0, 0.36, 0.24], [1.1, 0, 0.3, 0.3]]);
+      c.track('nacL', 'scale', [[0, 1.15, 1.15, 1.3], [0.55, 1.3, 1.3, 1.5], [1.1, 1.15, 1.15, 1.3]]);
+      c.track('nacR', 'scale', [[0, 1.15, 1.15, 1.3], [0.55, 1.3, 1.3, 1.5], [1.1, 1.15, 1.15, 1.3]]);
+      return c;
+    })(),
+  };
+
+  return pack(r, clips, 'ship-' + kind, { glow: sp.glow, length: sp.len });
+}
+
+// ======================================================================
+//  SKITTER — four-legged rusher
+// ======================================================================
+function buildRiggedSkitter() {
+  const r = new RigBuilder();
+  r.addBone('root');
+  // Bind pose convention across the cast: the rig origin is the deck contact
+  // point, so a walker's feet land at y = 0 and `hover` stays 0 for them.
+  r.addBone('body', 'root', [0, 0.86, 0]);
+  r.addBone('head', 'body', [0, 0.04, -0.5]);
+  const legs = [
+    ['FL', 1, -1], ['FR', -1, -1], ['BL', 1, 1], ['BR', -1, 1],
+  ];
+  for (const [id, sx, sz] of legs) {
+    r.addBone('leg' + id, 'body', [sx * 0.42, -0.10, sz * 0.38], [sz * 0.22, 0, sx * 1.15]);
+    r.addBone('leg' + id + 'b', 'leg' + id, [0, -0.56, 0], [0, 0, -sx * 1.15]);
+  }
+
+  r.part(PRIM.oct(0), { bone: 'body', scale: [1.05, 0.72, 1.25], color: PALETTE.voidMid });
+  r.part(PRIM.oct(0), { bone: 'body', pos: [0, 0.18, 0], scale: [0.62, 0.5, 0.7], color: PALETTE.voidDark });
+  r.part(PRIM.box(), { bone: 'body', pos: [0, 0.34, 0], scale: [0.06, 0.06, 1.0], color: PALETTE.magenta, emit: 2.2 });
+  for (let i = 0; i < 3; i++) {
+    r.part(PRIM.box(), { bone: 'body', pos: [0, 0.26, -0.3 + i * 0.3], scale: [0.5 - i * 0.1, 0.05, 0.08], color: PALETTE.voidLite });
+  }
+  r.part(PRIM.sph(8, 6), { bone: 'head', scale: 0.36, color: PALETTE.magenta, emit: 3.2, flat: false });
+  r.part(PRIM.tor(0.5, 0.1, 5, 10), { bone: 'head', rot: [Math.PI / 2, 0, 0], scale: 0.5, color: PALETTE.voidLite, flat: false });
+
+  for (const [id] of legs) {
+    r.part(PRIM.box(), { bone: 'leg' + id, pos: [0, -0.28, 0], scale: [0.14, 0.58, 0.14], color: PALETTE.voidLite });
+    r.part(PRIM.oct(0), { bone: 'leg' + id, scale: 0.24, color: PALETTE.voidDark });
+    r.part(PRIM.oct(0), { bone: 'leg' + id + 'b', scale: 0.2, color: PALETTE.voidLite });
+    r.part(PRIM.box(), { bone: 'leg' + id + 'b', pos: [0, -0.28, 0], scale: [0.11, 0.56, 0.11], color: PALETTE.voidDark });
+    r.part(PRIM.spike(0.26, 0.08, 4), { bone: 'leg' + id + 'b', pos: [0, -0.6, 0], rot: [Math.PI, 0, 0], color: PALETTE.bone });
+  }
+
+  // diagonal gait: FL+BR swing together, FR+BL oppose
+  const gait = (c, phase) => {
+    for (const [id, , ] of legs) {
+      const p = (id === 'FL' || id === 'BR') ? phase : phase + 0.5;
+      c.swing('leg' + id, 'x', 0.55, p);
+      c.swing('leg' + id + 'b', 'x', -0.42, p + 0.12);
+    }
+    return c;
+  };
+
+  const clips = {
+    idle: (() => {
+      const c = new Clip('idle', 2.0);
+      c.swing('body', 'y', 0.06);
+      c.track('body', 'pos', [[0, 0, 0, 0], [1, 0, 0.06, 0], [2, 0, 0, 0]]);
+      for (const [id] of legs) c.swing('leg' + id, 'x', 0.08, id === 'FL' ? 0 : 0.3);
+      return c;
+    })(),
+    scuttle: (() => {
+      const c = new Clip('scuttle', 0.42);
+      gait(c, 0);
+      c.track('body', 'pos', [[0, 0, 0, 0], [0.11, 0, 0.09, 0], [0.21, 0, 0, 0], [0.32, 0, 0.09, 0], [0.42, 0, 0, 0]]);
+      c.swing('body', 'z', 0.12, 0.25);
+      c.swing('head', 'x', 0.1, 0.5);
+      return c;
+    })(),
+    lunge: (() => {
+      const c = new Clip('lunge', 0.55, { loop: false });
+      c.track('body', 'pos', [[0, 0, 0, 0], [0.12, 0, -0.14, 0.2], [0.22, 0, 0.12, -0.34], [0.55, 0, 0, 0]]);
+      c.track('body', 'rot', [[0, 0, 0, 0], [0.12, 0.34, 0, 0], [0.24, -0.28, 0, 0], [0.55, 0, 0, 0]]);
+      for (const [id] of legs) {
+        c.track('leg' + id, 'rot', [[0, 0, 0, 0], [0.12, 0.8, 0, 0], [0.26, -0.7, 0, 0], [0.55, 0, 0, 0]]);
+        c.track('leg' + id + 'b', 'rot', [[0, 0, 0, 0], [0.12, -1.1, 0, 0], [0.26, 0.5, 0, 0], [0.55, 0, 0, 0]]);
+      }
+      c.track('head', 'scale', [[0, 1, 1, 1], [0.2, 1.5, 1.5, 1.5], [0.55, 1, 1, 1]]);
+      return c;
+    })(),
+  };
+  return pack(r, clips, 'skitter', { radius: 0.85 });
+}
+
+// ======================================================================
+//  DRONE — hovering gunnery platform
+// ======================================================================
+function buildRiggedDrone() {
+  const r = new RigBuilder();
+  r.addBone('root');
+  r.addBone('body', 'root');
+  r.addBone('ring', 'body');
+  r.addBone('barrel', 'body', [0, -0.12, -0.72]);
+  r.addBone('eye', 'body', [0, 0.02, -0.55]);
+  for (let i = 0; i < 3; i++) {
+    const a = (i / 3) * TAU + 0.5;
+    r.addBone('fin' + i, 'body', [Math.cos(a) * 0.78, -0.2, Math.sin(a) * 0.78], [0, -a, 0.4]);
+  }
+
+  r.part(PRIM.cyl(6), { bone: 'body', rot: [0, 0.5, 0], scale: [1.5, 0.42, 1.5], color: PALETTE.voidMid });
+  r.part(PRIM.cyl(6), { bone: 'body', pos: [0, 0.26, 0], rot: [0, 0.5, 0], scale: [0.95, 0.3, 0.95], color: PALETTE.voidDark });
+  r.part(PRIM.cyl(6), { bone: 'body', pos: [0, 0.44, 0], rot: [0, 0.5, 0], scale: [0.5, 0.16, 0.5], color: PALETTE.voidLite });
+  r.part(PRIM.tor(0.5, 0.07, 6, 18), { bone: 'ring', rot: [Math.PI / 2, 0, 0], scale: 2.05, color: PALETTE.magenta, emit: 2.6, flat: false });
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * TAU;
+    r.part(PRIM.box(), { bone: 'ring', pos: [Math.cos(a) * 1.02, 0, Math.sin(a) * 1.02], rot: [0, -a, 0], scale: [0.16, 0.1, 0.1], color: PALETTE.voidLite });
+  }
+  r.part(PRIM.sph(10, 8), { bone: 'eye', scale: 0.44, color: PALETTE.magenta, emit: 3.4, flat: false });
+  r.part(PRIM.cyl(6), { bone: 'barrel', rot: [Math.PI / 2, 0, 0], scale: [0.16, 0.7, 0.16], color: PALETTE.voidLite });
+  r.part(PRIM.cyl(6), { bone: 'barrel', pos: [0, 0, -0.3], rot: [Math.PI / 2, 0, 0], scale: [0.1, 0.2, 0.1], color: PALETTE.magenta, emit: 3.0 });
+  for (let i = 0; i < 3; i++) {
+    r.part(PRIM.box(), { bone: 'fin' + i, pos: [0, -0.22, 0], scale: [0.1, 0.44, 0.1], color: PALETTE.voidLite });
+    r.part(PRIM.box(), { bone: 'fin' + i, pos: [0, -0.44, 0], scale: [0.16, 0.06, 0.16], color: PALETTE.magenta, emit: 1.8 });
+  }
+
+  const clips = {
+    hover: (() => {
+      const c = new Clip('hover', 2.2);
+      c.track('body', 'pos', [[0, 0, 0, 0], [1.1, 0, 0.1, 0], [2.2, 0, 0, 0]]);
+      for (let i = 0; i < 3; i++) c.swing('fin' + i, 'z', 0.22, i / 3);
+      c.swing('body', 'x', 0.05, 0.3);
+      return c;
+    })(),
+    fire: (() => {
+      const c = new Clip('fire', 0.36, { loop: false });
+      c.track('barrel', 'pos', [[0, 0, 0, 0], [0.05, 0, 0, 0.26], [0.36, 0, 0, 0]]);
+      c.track('eye', 'scale', [[0, 1, 1, 1], [0.05, 1.5, 1.5, 1.5], [0.36, 1, 1, 1]]);
+      c.track('body', 'rot', [[0, 0, 0, 0], [0.05, -0.14, 0, 0], [0.36, 0, 0, 0]]);
+      for (let i = 0; i < 3; i++) c.track('fin' + i, 'rot', [[0, 0, 0, 0], [0.06, 0, 0, -0.3], [0.36, 0, 0, 0]]);
+      return c;
+    })(),
+  };
+  return pack(r, clips, 'drone', { radius: 1.0 });
+}
+
+// ======================================================================
+//  SPLITTER — unstable lattice
+// ======================================================================
+function buildRiggedSplitter() {
+  const r = new RigBuilder();
+  r.addBone('root');
+  r.addBone('core', 'root');
+  for (let i = 0; i < 3; i++) r.addBone('shell' + i, 'root', [0, 0, 0], [i * 0.9, i * 1.4, i * 0.6]);
+
+  r.part(PRIM.sph(10, 8), { bone: 'core', scale: 0.9, color: PALETTE.violet, emit: 2.8, flat: false });
+  r.part(PRIM.ico(0), { bone: 'core', scale: 1.2, rot: [0.4, 0.3, 0], color: PALETTE.voidDark });
+  for (let i = 0; i < 3; i++) {
+    r.part(PRIM.ico(0), { bone: 'shell' + i, scale: [2.0, 0.5, 2.0], color: i === 0 ? PALETTE.voidMid : PALETTE.voidDark });
+    for (let k = 0; k < 4; k++) {
+      const a = (k / 4) * TAU + i;
+      r.part(PRIM.box(), {
+        bone: 'shell' + i, pos: [Math.cos(a) * 0.72, 0, Math.sin(a) * 0.72], rot: [0, -a, 0],
+        scale: [0.8, 0.06, 0.06], color: PALETTE.violet, emit: 2.4,
+      });
+    }
+  }
+
+  const clips = {
+    idle: (() => {
+      const c = new Clip('idle', 3.0);
+      for (let i = 0; i < 3; i++) {
+        c.track('shell' + i, 'rot', [[0, 0, 0, 0], [1.5, 0.5 + i * 0.2, 1.2, 0.3], [3.0, 0, 0, 0]]);
+      }
+      c.track('core', 'scale', [[0, 1, 1, 1], [1.5, 1.16, 1.16, 1.16], [3.0, 1, 1, 1]]);
+      return c;
+    })(),
+    strain: (() => {
+      const c = new Clip('strain', 0.5);
+      for (let i = 0; i < 3; i++) {
+        c.track('shell' + i, 'pos', [[0, 0, 0, 0], [0.25, (i - 1) * 0.3, 0.25, (1 - i) * 0.3], [0.5, 0, 0, 0]]);
+      }
+      c.track('core', 'scale', [[0, 1.2, 1.2, 1.2], [0.25, 1.45, 1.45, 1.45], [0.5, 1.2, 1.2, 1.2]]);
+      return c;
+    })(),
+  };
+  return pack(r, clips, 'splitter', { radius: 1.05 });
+}
+
+// ======================================================================
+//  SEEDER — artillery frame
+// ======================================================================
+function buildRiggedSeeder() {
+  const r = new RigBuilder();
+  r.addBone('root');
+  r.addBone('hull', 'root', [0, 0.8, 0]);
+  r.addBone('dome', 'hull', [0, 0.35, 0]);
+  for (let i = 0; i < 3; i++) {
+    const a = (i / 3) * TAU;
+    r.addBone('barrel' + i, 'dome', [Math.cos(a) * 0.5, 0.5, Math.sin(a) * 0.5], [Math.cos(a) * 0.32, 0, -Math.sin(a) * 0.32]);
+  }
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * TAU + 0.4;
+    r.addBone('leg' + i, 'hull', [Math.cos(a) * 0.95, -0.1, Math.sin(a) * 0.95], [0, -a, 0.35]);
+  }
+
+  r.part(PRIM.cyl(8), { bone: 'hull', scale: [2.05, 0.4, 2.05], color: PALETTE.voidDark });
+  r.part(PRIM.sph(10, 6), { bone: 'dome', scale: [2.0, 1.1, 2.0], color: PALETTE.voidMid, flat: false });
+  r.part(PRIM.tor(0.5, 0.09, 6, 16), { bone: 'dome', pos: [0, 0.05, 0], rot: [Math.PI / 2, 0, 0], scale: 2.2, color: PALETTE.amber, emit: 2.4, flat: false });
+  r.part(PRIM.sph(8, 6), { bone: 'dome', pos: [0, 0.45, -0.9], scale: 0.34, color: PALETTE.amber, emit: 3.0, flat: false });
+  for (let i = 0; i < 3; i++) {
+    r.part(PRIM.cyl(6), { bone: 'barrel' + i, pos: [0, 0.3, 0], scale: [0.26, 0.9, 0.26], color: PALETTE.voidLite });
+    r.part(PRIM.cyl(6), { bone: 'barrel' + i, pos: [0, 0.78, 0], scale: [0.2, 0.14, 0.2], color: PALETTE.amber, emit: 3.2 });
+    r.part(PRIM.tor(0.5, 0.1, 5, 10), { bone: 'barrel' + i, pos: [0, 0.55, 0], rot: [Math.PI / 2, 0, 0], scale: 0.62, color: PALETTE.voidDark, flat: false });
+  }
+  for (let i = 0; i < 4; i++) {
+    r.part(PRIM.box(), { bone: 'leg' + i, pos: [0, -0.24, 0], scale: [0.16, 0.5, 0.16], color: PALETTE.voidLite });
+    r.part(PRIM.box(), { bone: 'leg' + i, pos: [0, -0.5, 0], scale: [0.3, 0.1, 0.3], color: PALETTE.voidMid });
+  }
+
+  const clips = {
+    idle: (() => {
+      const c = new Clip('idle', 3.4);
+      c.track('dome', 'rot', [[0, 0, 0, 0], [1.7, 0, 0.5, 0], [3.4, 0, 0, 0]]);
+      c.track('hull', 'pos', [[0, 0, 0, 0], [1.7, 0, 0.05, 0], [3.4, 0, 0, 0]]);
+      for (let i = 0; i < 4; i++) c.swing('leg' + i, 'z', 0.07, i / 4);
+      return c;
+    })(),
+    fire: (() => {
+      const c = new Clip('fire', 0.7, { loop: false });
+      for (let i = 0; i < 3; i++) {
+        const t = i * 0.06;
+        c.track('barrel' + i, 'pos', [[0, 0, 0, 0], [t + 0.04, 0, -0.24, 0], [t + 0.36, 0, 0, 0], [0.7, 0, 0, 0]]);
+      }
+      c.track('hull', 'pos', [[0, 0, 0, 0], [0.08, 0, -0.14, 0], [0.5, 0, 0, 0], [0.7, 0, 0, 0]]);
+      c.track('dome', 'scale', [[0, 1, 1, 1], [0.08, 1.08, 0.92, 1.08], [0.5, 1, 1, 1], [0.7, 1, 1, 1]]);
+      return c;
+    })(),
+  };
+  return pack(r, clips, 'seeder', { radius: 1.25 });
+}
+
+// ======================================================================
+//  LANCER — armoured ram
+// ======================================================================
+function buildRiggedLancer() {
+  const r = new RigBuilder();
+  r.addBone('root');
+  r.addBone('body', 'root', [0, 0.95, 0]);
+  r.addBone('horn', 'body', [0, -0.05, -1.5]);
+  r.addBone('hornL', 'body', [0.45, 0.07, -1.3], [0, 0, 0.3]);
+  r.addBone('hornR', 'body', [-0.45, 0.07, -1.3], [0, 0, -0.3]);
+  r.addBone('eye', 'body', [0, 0.4, -0.95]);
+  const legs = [['FL', 1, -0.5], ['FR', -1, -0.5], ['BL', 1, 0.9], ['BR', -1, 0.9]];
+  for (const [id, sx, sz] of legs) r.addBone('leg' + id, 'body', [sx * 0.7, -0.3, sz], [0, 0, -sx * 0.6]);
+  r.addBone('boostL', 'body', [0.45, 0, 1.5]);
+  r.addBone('boostR', 'body', [-0.45, 0, 1.5]);
+
+  r.part(PRIM.wedge(1.7, 0.95, 3.1, 0.2), { bone: 'body', color: PALETTE.voidMid });
+  r.part(PRIM.wedge(1.15, 0.5, 2.0, 0.35), { bone: 'body', pos: [0, 0.5, -0.3], color: PALETTE.voidDark });
+  for (let i = 0; i < 3; i++) {
+    r.part(PRIM.box(), { bone: 'body', pos: [0, 0.76, -0.6 + i * 0.5], scale: [0.9 - i * 0.15, 0.06, 0.14], color: PALETTE.voidLite });
+  }
+  r.part(PRIM.spike(1.5, 0.22, 4), { bone: 'horn', rot: [-Math.PI / 2, 0, Math.PI / 4], color: PALETTE.bone });
+  r.part(PRIM.spike(1.0, 0.16, 4), { bone: 'hornL', rot: [-Math.PI / 2, 0, 0.3], color: PALETTE.bone });
+  r.part(PRIM.spike(1.0, 0.16, 4), { bone: 'hornR', rot: [-Math.PI / 2, 0, -0.3], color: PALETTE.bone });
+  r.part(PRIM.sph(10, 8), { bone: 'eye', scale: 0.42, color: PALETTE.amber, emit: 3.2, flat: false });
+  r.part(PRIM.box(), { bone: 'body', pos: [0.85, -0.05, 0.35], scale: [0.16, 0.7, 1.5], color: PALETTE.voidLite });
+  r.part(PRIM.box(), { bone: 'body', pos: [-0.85, -0.05, 0.35], scale: [0.16, 0.7, 1.5], color: PALETTE.voidLite });
+  for (const bone of ['boostL', 'boostR']) {
+    r.part(PRIM.cyl(6), { bone, rot: [Math.PI / 2, 0, 0], scale: [0.42, 0.7, 0.42], color: PALETTE.voidDark });
+    r.part(PRIM.cyl(6), { bone, pos: [0, 0, 0.32], rot: [Math.PI / 2, 0, 0], scale: [0.3, 0.16, 0.3], color: PALETTE.amber, emit: 3.4 });
+  }
+  for (const [id] of legs) {
+    r.part(PRIM.box(), { bone: 'leg' + id, pos: [0, -0.3, 0], scale: [0.16, 0.66, 0.16], color: PALETTE.voidLite });
+    r.part(PRIM.box(), { bone: 'leg' + id, pos: [0, -0.62, 0], scale: [0.3, 0.12, 0.4], color: PALETTE.voidMid });
+  }
+
+  const clips = {
+    prowl: (() => {
+      const c = new Clip('prowl', 0.9);
+      for (const [id] of legs) c.swing('leg' + id, 'x', 0.4, (id === 'FL' || id === 'BR') ? 0 : 0.5);
+      c.track('body', 'pos', [[0, 0, 0, 0], [0.22, 0, 0.07, 0], [0.45, 0, 0, 0], [0.68, 0, 0.07, 0], [0.9, 0, 0, 0]]);
+      c.swing('body', 'z', 0.06, 0.25);
+      return c;
+    })(),
+    windup: (() => {
+      const c = new Clip('windup', 0.85, { loop: false });
+      c.track('body', 'pos', [[0, 0, 0, 0], [0.5, 0, -0.18, 0.55], [0.85, 0, -0.1, 0.3]]);
+      c.track('body', 'rot', [[0, 0, 0, 0], [0.5, -0.2, 0, 0], [0.85, -0.14, 0, 0]]);
+      c.track('hornL', 'rot', [[0, 0, 0, 0], [0.5, 0, 0, 0.5], [0.85, 0, 0, 0.42]]);
+      c.track('hornR', 'rot', [[0, 0, 0, 0], [0.5, 0, 0, -0.5], [0.85, 0, 0, -0.42]]);
+      c.track('eye', 'scale', [[0, 1, 1, 1], [0.5, 1.7, 1.7, 1.7], [0.85, 1.5, 1.5, 1.5]]);
+      for (const [id] of legs) c.track('leg' + id, 'rot', [[0, 0, 0, 0], [0.5, 0.5, 0, 0], [0.85, 0.35, 0, 0]]);
+      return c;
+    })(),
+    charge: (() => {
+      const c = new Clip('charge', 0.5);
+      c.track('body', 'pos', [[0, 0, -0.1, 0.1], [0.25, 0, -0.05, -0.05], [0.5, 0, -0.1, 0.1]]);
+      c.track('body', 'rot', [[0, 0.14, 0, 0], [0.25, 0.2, 0, 0], [0.5, 0.14, 0, 0]]);
+      for (const [id] of legs) c.swing('leg' + id, 'x', 0.7, (id === 'FL' || id === 'BR') ? 0 : 0.5);
+      c.track('boostL', 'scale', [[0, 1.3, 1.3, 1.6], [0.25, 1.1, 1.1, 1.3], [0.5, 1.3, 1.3, 1.6]]);
+      c.track('boostR', 'scale', [[0, 1.3, 1.3, 1.6], [0.25, 1.1, 1.1, 1.3], [0.5, 1.3, 1.3, 1.6]]);
+      return c;
+    })(),
+    stunned: (() => {
+      const c = new Clip('stunned', 0.7);
+      c.track('body', 'rot', [[0, 0.2, 0.1, 0.1], [0.35, 0.1, -0.1, -0.1], [0.7, 0.2, 0.1, 0.1]]);
+      c.track('body', 'pos', [[0, 0, -0.2, 0], [0.35, 0, -0.14, 0], [0.7, 0, -0.2, 0]]);
+      for (const [id] of legs) c.track('leg' + id, 'rot', [[0, 0.3, 0, 0], [0.35, 0.1, 0, 0], [0.7, 0.3, 0, 0]]);
+      return c;
+    })(),
+  };
+  return pack(r, clips, 'lancer', { radius: 1.35 });
+}
+
+// ======================================================================
+//  SENTINEL — siege tripod
+// ======================================================================
+function buildRiggedSentinel() {
+  const r = new RigBuilder();
+  r.addBone('root');
+  r.addBone('hip', 'root', [0, 2.0, 0]);
+  r.addBone('head', 'hip', [0, 0.5, -0.35]);
+  r.addBone('emitter', 'head', [0, -0.05, -0.9]);
+  for (let i = 0; i < 3; i++) {
+    const a = (i / 3) * TAU + Math.PI / 2;
+    r.addBone('leg' + i, 'hip', [Math.cos(a) * 0.7, -0.35, Math.sin(a) * 0.7], [0, -a, 0.55]);
+    r.addBone('leg' + i + 'b', 'leg' + i, [0, -0.95, 0], [0, 0, -0.95]);
+  }
+
+  r.part(PRIM.wedge(1.5, 1.35, 2.1, 0.45), { bone: 'hip', color: PALETTE.voidMid });
+  r.part(PRIM.cyl(8), { bone: 'hip', pos: [0, 0.6, 0], scale: [1.0, 0.3, 1.0], color: PALETTE.voidLite });
+  r.part(PRIM.box(), { bone: 'head', scale: [1.05, 0.42, 1.05], color: PALETTE.voidDark });
+  r.part(PRIM.box(), { bone: 'head', pos: [0, 0.26, 0.2], scale: [0.08, 0.08, 1.4], color: PALETTE.magenta, emit: 2.4 });
+  r.part(PRIM.cyl(8), { bone: 'emitter', rot: [Math.PI / 2, 0, 0], scale: [0.5, 1.0, 0.5], color: PALETTE.voidLite });
+  r.part(PRIM.tor(0.5, 0.1, 6, 14), { bone: 'emitter', pos: [0, 0, -0.4], scale: 1.1, color: PALETTE.magenta, emit: 2.8, flat: false });
+  r.part(PRIM.sph(10, 8), { bone: 'emitter', pos: [0, 0, -0.52], scale: 0.5, color: 0xff6ec7, emit: 3.4, flat: false });
+  for (let i = 0; i < 3; i++) {
+    r.part(PRIM.box(), { bone: 'leg' + i, pos: [0, -0.48, 0], scale: [0.24, 0.98, 0.24], color: PALETTE.voidLite });
+    r.part(PRIM.oct(0), { bone: 'leg' + i, scale: 0.34, color: PALETTE.voidDark });
+    r.part(PRIM.box(), { bone: 'leg' + i + 'b', pos: [0, -0.4, 0], scale: [0.2, 0.82, 0.2], color: PALETTE.voidDark });
+    r.part(PRIM.box(), { bone: 'leg' + i + 'b', pos: [0, -0.82, 0], scale: [0.42, 0.14, 0.42], color: PALETTE.voidMid });
+  }
+
+  const clips = {
+    walk: (() => {
+      const c = new Clip('walk', 1.4);
+      for (let i = 0; i < 3; i++) {
+        c.swing('leg' + i, 'x', 0.42, i / 3);
+        c.swing('leg' + i + 'b', 'x', -0.34, i / 3 + 0.14);
+      }
+      c.track('hip', 'pos', [[0, 0, 0, 0], [0.23, 0, 0.1, 0], [0.47, 0, 0, 0], [0.7, 0, 0.1, 0], [1.4, 0, 0, 0]]);
+      c.swing('head', 'y', 0.06, 0.25);
+      return c;
+    })(),
+    brace: (() => {
+      const c = new Clip('brace', 1.05, { loop: false });
+      for (let i = 0; i < 3; i++) {
+        c.track('leg' + i, 'rot', [[0, 0, 0, 0], [0.5, 0, 0, 0.28], [1.05, 0, 0, 0.34]]);
+        c.track('leg' + i + 'b', 'rot', [[0, 0, 0, 0], [0.5, 0, 0, -0.3], [1.05, 0, 0, -0.36]]);
+      }
+      c.track('hip', 'pos', [[0, 0, 0, 0], [0.5, 0, -0.22, 0], [1.05, 0, -0.28, 0]]);
+      c.track('head', 'rot', [[0, 0, 0, 0], [0.5, -0.14, 0, 0], [1.05, -0.18, 0, 0]]);
+      c.track('emitter', 'scale', [[0, 1, 1, 1], [0.6, 1.35, 1.35, 1.1], [1.05, 1.5, 1.5, 1.2]]);
+      return c;
+    })(),
+    fire: (() => {
+      const c = new Clip('fire', 0.45, { loop: false });
+      c.track('emitter', 'pos', [[0, 0, 0, 0], [0.05, 0, 0, 0.3], [0.45, 0, 0, 0]]);
+      c.track('emitter', 'scale', [[0, 1.5, 1.5, 1.2], [0.06, 1.9, 1.9, 1.0], [0.45, 1, 1, 1]]);
+      c.track('hip', 'pos', [[0, 0, -0.28, 0], [0.06, 0, -0.34, 0.2], [0.45, 0, 0, 0]]);
+      c.track('head', 'rot', [[0, -0.18, 0, 0], [0.06, 0.1, 0, 0], [0.45, 0, 0, 0]]);
+      return c;
+    })(),
+  };
+  return pack(r, clips, 'sentinel', { radius: 1.4 });
+}
+
+const RIGGED_ENEMIES = {
+  skitter: buildRiggedSkitter,
+  drone: buildRiggedDrone,
+  splitter: buildRiggedSplitter,
+  seeder: buildRiggedSeeder,
+  lancer: buildRiggedLancer,
+  sentinel: buildRiggedSentinel,
+};
+
+// ======================================================================
+//  BOSSES — one draw call each, fully articulated
+// ======================================================================
+
+/** THE WARDEN — orbital plate ring around a caged core. */
+function buildRiggedWarden() {
+  const r = new RigBuilder();
+  r.addBone('root');
+  r.addBone('core', 'root');
+  r.addBone('halo', 'core');
+  r.addBone('ring', 'root');
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * TAU;
+    r.addBone('plate' + i, 'ring', [Math.cos(a) * 5.6, 0, Math.sin(a) * 5.6], [0, -a + Math.PI / 2, 0]);
+  }
+  r.addBone('turretL', 'root', [4.4, -1.6, 0], [0, Math.PI / 2, 0]);
+  r.addBone('turretR', 'root', [-4.4, -1.6, 0], [0, -Math.PI / 2, 0]);
+
+  r.part(PRIM.oct(0), { bone: 'core', scale: 4.4, color: PALETTE.voidMid });
+  r.part(PRIM.oct(0), { bone: 'core', scale: 3.0, rot: [0.4, 0.4, 0], color: PALETTE.voidDark });
+  r.part(PRIM.sph(12, 10), { bone: 'core', scale: 2.2, color: PALETTE.magenta, emit: 2.6, flat: false });
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * TAU;
+    r.part(PRIM.spike(1.6, 0.24, 4), {
+      bone: 'core', pos: [Math.cos(a) * 2.1, 0.4, Math.sin(a) * 2.1],
+      rot: [Math.PI / 2, 0, -a + Math.PI / 2], color: PALETTE.bone,
+    });
+  }
+  r.part(PRIM.tor(0.5, 0.06, 6, 24), { bone: 'halo', rot: [Math.PI / 2, 0, 0], scale: 6.4, color: PALETTE.magenta, emit: 2.2, flat: false });
+  r.part(PRIM.tor(0.5, 0.04, 6, 20), { bone: 'halo', rot: [0, 0, Math.PI / 2], scale: 5.6, color: 0xff8ad0, emit: 2.0, flat: false });
+
+  r.part(PRIM.tor(0.5, 0.055, 8, 32), { bone: 'ring', rot: [Math.PI / 2, 0, 0], scale: 11.2, color: PALETTE.voidLite, flat: false });
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * TAU;
+    r.part(PRIM.wedge(0.9, 0.5, 1.6, 0.4), { bone: 'ring', pos: [Math.cos(a) * 5.6, 0, Math.sin(a) * 5.6], rot: [0, -a + Math.PI / 2, 0], color: PALETTE.voidMid });
+    r.part(PRIM.box(), { bone: 'ring', pos: [Math.cos(a) * 6.1, 0, Math.sin(a) * 6.1], rot: [0, -a, 0], scale: [0.5, 0.1, 0.1], color: PALETTE.magenta, emit: 2.8 });
+  }
+  for (let i = 0; i < 4; i++) {
+    r.part(PRIM.wedge(2.2, 0.55, 3.0, 0.5), { bone: 'plate' + i, color: PALETTE.voidMid });
+    r.part(PRIM.box(), { bone: 'plate' + i, pos: [0, 0.34, 0], scale: [1.4, 0.1, 2.0], color: PALETTE.cyan, emit: 2.4 });
+    r.part(PRIM.oct(0), { bone: 'plate' + i, pos: [0, 0.3, -1.2], scale: 0.7, color: PALETTE.cyan, emit: 2.8 });
+  }
+  for (const bone of ['turretL', 'turretR']) {
+    r.part(PRIM.cyl(6), { bone, rot: [Math.PI / 2, 0, 0], scale: [0.6, 1.8, 0.6], color: PALETTE.voidDark });
+    r.part(PRIM.sph(8, 6), { bone, pos: [0, 0, -1.0], scale: 0.6, color: PALETTE.magenta, emit: 3.4, flat: false });
+    r.part(PRIM.tor(0.5, 0.12, 5, 10), { bone, pos: [0, 0, -0.7], scale: 1.0, color: PALETTE.voidLite, flat: false });
+  }
+
+  const clips = {
+    idle: (() => {
+      const c = new Clip('idle', 4.0);
+      c.track('core', 'pos', [[0, 0, 0, 0], [2, 0, 0.6, 0], [4, 0, 0, 0]]);
+      c.swing('core', 'x', 0.08);
+      for (let i = 0; i < 4; i++) {
+        c.track('plate' + i, 'pos', [[0, 0, 0, 0], [2, 0, 0.9 * (i % 2 ? 1 : -1), 0], [4, 0, 0, 0]]);
+        c.swing('plate' + i, 'z', 0.16, i / 4);
+      }
+      c.swing('turretL', 'x', 0.1, 0.2);
+      c.swing('turretR', 'x', 0.1, 0.7);
+      return c;
+    })(),
+    slam: (() => {
+      const c = new Clip('slam', 2.0, { loop: false });
+      c.track('core', 'pos', [[0, 0, 0, 0], [1.05, 0, 3.6, 0], [1.2, 0, -2.2, 0], [2.0, 0, 0, 0]]);
+      c.track('core', 'scale', [[0, 1, 1, 1], [1.0, 0.86, 1.2, 0.86], [1.2, 1.3, 0.7, 1.3], [2.0, 1, 1, 1]]);
+      for (let i = 0; i < 4; i++) {
+        c.track('plate' + i, 'pos', [[0, 0, 0, 0], [1.0, 0, 2.0, -1.6], [1.25, 0, -0.8, 2.4], [2.0, 0, 0, 0]]);
+        c.track('plate' + i, 'rot', [[0, 0, 0, 0], [1.0, -0.5, 0, 0], [1.25, 0.6, 0, 0], [2.0, 0, 0, 0]]);
+      }
+      return c;
+    })(),
+    barrage: (() => {
+      const c = new Clip('barrage', 1.2);
+      c.track('core', 'scale', [[0, 1, 1, 1], [0.15, 1.14, 1.14, 1.14], [0.6, 1, 1, 1], [1.2, 1, 1, 1]]);
+      for (let i = 0; i < 4; i++) c.track('plate' + i, 'pos', [[0, 0, 0, 0], [0.6, 0, 0, -1.1], [1.2, 0, 0, 0]]);
+      c.track('turretL', 'pos', [[0, 0, 0, 0], [0.1, 0, 0, 0.5], [0.5, 0, 0, 0], [1.2, 0, 0, 0]]);
+      c.track('turretR', 'pos', [[0, 0, 0, 0], [0.3, 0, 0, 0.5], [0.7, 0, 0, 0], [1.2, 0, 0, 0]]);
+      return c;
+    })(),
+    summon: (() => {
+      const c = new Clip('summon', 1.4, { loop: false });
+      for (let i = 0; i < 4; i++) {
+        c.track('plate' + i, 'rot', [[0, 0, 0, 0], [0.5, 0, 0, -1.1], [1.0, 0, 0, -1.1], [1.4, 0, 0, 0]]);
+        c.track('plate' + i, 'pos', [[0, 0, 0, 0], [0.5, 0, 1.4, 0], [1.0, 0, 1.4, 0], [1.4, 0, 0, 0]]);
+      }
+      c.track('core', 'scale', [[0, 1, 1, 1], [0.6, 1.24, 1.24, 1.24], [1.4, 1, 1, 1]]);
+      return c;
+    })(),
+    rage: (() => {
+      const c = new Clip('rage', 1.6, { loop: false });
+      c.track('core', 'scale', [[0, 1, 1, 1], [0.2, 1.5, 1.5, 1.5], [0.8, 0.9, 0.9, 0.9], [1.6, 1, 1, 1]]);
+      for (let i = 0; i < 4; i++) {
+        c.track('plate' + i, 'pos', [[0, 0, 0, 0], [0.25, 0, 2.6, -2.6], [1.6, 0, 0, 0]]);
+        c.track('plate' + i, 'rot', [[0, 0, 0, 0], [0.25, 1.2, 0.8, 0], [1.6, 0, 0, 0]]);
+      }
+      return c;
+    })(),
+  };
+  return pack(r, clips, 'warden', { radius: 6.4 });
+}
+
+/** THE HARROWER — bladed hull with sweeping beam arms and a segmented tail. */
+function buildRiggedHarrower() {
+  const r = new RigBuilder();
+  r.addBone('root');
+  r.addBone('core', 'root');
+  r.addBone('spear', 'core', [0, 0.2, -5.4]);
+  r.addBone('armL', 'core', [3.4, 0.4, -0.5]);
+  r.addBone('armR', 'core', [-3.4, 0.4, -0.5]);
+  r.addBone('tail0', 'core', [0, 0.1, 3.6]);
+  r.addBone('tail1', 'tail0', [0, 0, 1.15]);
+  r.addBone('tail2', 'tail1', [0, 0, 1.15]);
+  r.addBone('tail3', 'tail2', [0, 0, 1.15]);
+
+  r.part(PRIM.wedge(4.0, 2.4, 9.0, 0.25), { bone: 'core', color: PALETTE.voidMid });
+  r.part(PRIM.wedge(2.6, 1.2, 6.0, 0.4), { bone: 'core', pos: [0, 1.2, -0.6], color: PALETTE.voidDark });
+  r.part(PRIM.sph(12, 10), { bone: 'core', pos: [0, 0.9, -2.6], scale: 1.7, color: 0xff5ab0, emit: 3.2, flat: false });
+  r.part(PRIM.box(), { bone: 'core', pos: [0, 1.75, 0], scale: [0.12, 0.12, 6.5], color: PALETTE.magenta, emit: 2.6 });
+  for (let i = 0; i < 3; i++) {
+    r.part(PRIM.box(), { bone: 'core', pos: [0, 1.5, -2.2 + i * 1.6], scale: [1.8 - i * 0.3, 0.08, 0.2], color: PALETTE.voidLite });
+  }
+  r.part(PRIM.spike(3.0, 0.5, 5), { bone: 'spear', rot: [-Math.PI / 2, 0, 0], color: PALETTE.bone });
+  r.part(PRIM.tor(0.5, 0.14, 5, 10), { bone: 'spear', pos: [0, 0, 1.0], scale: 1.1, color: PALETTE.magenta, emit: 2.4, flat: false });
+
+  for (const [bone, s] of [['armL', 1], ['armR', -1]]) {
+    r.part(PRIM.box(), { bone, pos: [0, 0, 1.6], scale: [0.7, 0.5, 4.4], color: PALETTE.voidMid });
+    r.part(PRIM.cyl(6), { bone, pos: [0, 0, -0.9], rot: [Math.PI / 2, 0, 0], scale: [1.0, 1.6, 1.0], color: PALETTE.voidDark });
+    r.part(PRIM.tor(0.5, 0.1, 6, 16), { bone, pos: [0, 0, -1.7], scale: 2.0, color: PALETTE.magenta, emit: 3.0, flat: false });
+    r.part(PRIM.sph(10, 8), { bone, pos: [0, 0, -1.85], scale: 0.8, color: 0xffa8d8, emit: 3.6, flat: false });
+    r.part(PRIM.wedge(0.4, 1.2, 2.4, 0.4), { bone, pos: [s * 0.5, 0.5, 1.2], rot: [0, 0, -s * 0.3], color: PALETTE.voidLite });
+  }
+  for (let i = 0; i < 4; i++) {
+    r.part(PRIM.wedge(2.6 - i * 0.5, 0.9, 1.15, 0.7), { bone: 'tail' + i, color: i % 2 ? PALETTE.voidDark : PALETTE.voidLite });
+    r.part(PRIM.box(), { bone: 'tail' + i, pos: [0, 0.5, 0], scale: [0.9 - i * 0.16, 0.06, 0.5], color: PALETTE.magenta, emit: 2.0 });
+  }
+
+  const clips = {
+    idle: (() => {
+      const c = new Clip('idle', 3.2);
+      c.swing('core', 'z', 0.06);
+      c.track('core', 'pos', [[0, 0, 0, 0], [1.6, 0, 0.5, 0], [3.2, 0, 0, 0]]);
+      for (let i = 0; i < 4; i++) c.swing('tail' + i, 'y', 0.16, i * 0.12);
+      c.swing('armL', 'y', 0.18, 0.1);
+      c.swing('armR', 'y', -0.18, 0.1);
+      return c;
+    })(),
+    sweep: (() => {
+      const c = new Clip('sweep', 1.0, { loop: false });
+      c.track('armL', 'rot', [[0, 0, 0, 0], [0.5, 0, -0.55, 0], [1.0, 0, -0.62, 0]]);
+      c.track('armR', 'rot', [[0, 0, 0, 0], [0.5, 0, 0.55, 0], [1.0, 0, 0.62, 0]]);
+      c.track('armL', 'pos', [[0, 0, 0, 0], [1.0, 0.5, 0, -0.8]]);
+      c.track('armR', 'pos', [[0, 0, 0, 0], [1.0, -0.5, 0, -0.8]]);
+      c.track('core', 'rot', [[0, 0, 0, 0], [1.0, -0.1, 0, 0]]);
+      return c;
+    })(),
+    charge: (() => {
+      const c = new Clip('charge', 0.8);
+      c.track('core', 'rot', [[0, 0.16, 0, 0], [0.4, 0.22, 0, 0], [0.8, 0.16, 0, 0]]);
+      c.track('armL', 'rot', [[0, 0, 0.5, 0], [0.8, 0, 0.5, 0]]);
+      c.track('armR', 'rot', [[0, 0, -0.5, 0], [0.8, 0, -0.5, 0]]);
+      for (let i = 0; i < 4; i++) c.swing('tail' + i, 'y', 0.34, i * 0.16);
+      return c;
+    })(),
+    volley: (() => {
+      const c = new Clip('volley', 0.7, { loop: false });
+      c.track('core', 'pos', [[0, 0, 0, 0], [0.08, 0, 0, 0.8], [0.5, 0, 0, 0], [0.7, 0, 0, 0]]);
+      c.track('armL', 'pos', [[0, 0, 0, 0], [0.08, 0, 0, 0.7], [0.5, 0, 0, 0], [0.7, 0, 0, 0]]);
+      c.track('armR', 'pos', [[0, 0, 0, 0], [0.08, 0, 0, 0.7], [0.5, 0, 0, 0], [0.7, 0, 0, 0]]);
+      return c;
+    })(),
+  };
+  return pack(r, clips, 'harrower', { radius: 5.4 });
+}
+
+/** THE VOID MAW — a spiked sphere that opens on a vulnerable eye. */
+function buildRiggedMaw() {
+  const r = new RigBuilder();
+  r.addBone('root');
+  r.addBone('core', 'root');
+  r.addBone('ring', 'root');
+  r.addBone('jawT', 'root', [0, 2.6, -3.4]);
+  r.addBone('jawB', 'root', [0, -2.6, -3.4]);
+  r.addBone('eye', 'root', [0, 0, -4.2]);
+
+  r.part(PRIM.ico(1), { bone: 'core', scale: 8.0, color: PALETTE.voidMid });
+  r.part(PRIM.ico(0), { bone: 'core', scale: 6.6, rot: [0.5, 0.3, 0.2], color: PALETTE.voidLite });
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * TAU;
+    r.part(PRIM.box(), {
+      bone: 'core', pos: [Math.cos(a) * 3.6, Math.sin(i * 1.7) * 2.6, Math.sin(a) * 3.6],
+      rot: [0, -a, 0.4], scale: [2.6, 0.12, 0.12], color: PALETTE.magenta, emit: 2.6,
+    });
+  }
+  r.part(PRIM.sph(16, 12), { bone: 'core', scale: 4.6, color: 0xff2f8f, emit: 2.4, flat: false });
+  for (let i = 0; i < 14; i++) {
+    const a = (i / 14) * TAU;
+    const y = Math.sin(i * 2.4) * 2.4;
+    const rr = Math.sqrt(Math.max(0.1, 16 - y * y * 0.6));
+    r.part(PRIM.spike(2.4, 0.34, 4), {
+      bone: 'core', pos: [Math.cos(a) * rr, y, Math.sin(a) * rr],
+      rot: [Math.PI / 2 - Math.atan2(y, rr) * 0.6, -a, 0],
+      color: i % 3 === 0 ? PALETTE.bone : PALETTE.voidLite,
+    });
+  }
+  r.part(PRIM.tor(0.5, 0.05, 6, 30), { bone: 'ring', rot: [Math.PI / 2, 0, 0], scale: 13.0, color: PALETTE.violet, emit: 2.2, flat: false });
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * TAU;
+    r.part(PRIM.oct(0), { bone: 'ring', pos: [Math.cos(a) * 6.5, 0, Math.sin(a) * 6.5], scale: 0.7, color: PALETTE.violet, emit: 2.6 });
+  }
+  for (const [bone, s] of [['jawT', 1], ['jawB', -1]]) {
+    r.part(PRIM.wedge(5.0, 1.4, 5.0, 0.35), { bone, rot: [s * 0.2, 0, s > 0 ? 0 : Math.PI], color: PALETTE.voidMid });
+    for (let i = 0; i < 5; i++) {
+      r.part(PRIM.spike(1.5, 0.26, 4), { bone, pos: [-1.8 + i * 0.9, s * -0.3, -2.0], rot: [s * -Math.PI * 0.62, 0, 0], color: PALETTE.bone });
+    }
+    r.part(PRIM.box(), { bone, pos: [0, s * 0.6, 0.4], scale: [3.6, 0.1, 0.14], color: PALETTE.magenta, emit: 2.8 });
+  }
+  r.part(PRIM.sph(12, 10), { bone: 'eye', scale: 1.3, color: 0xffe36e, emit: 3.6, flat: false });
+  r.part(PRIM.tor(0.5, 0.12, 6, 14), { bone: 'eye', rot: [Math.PI / 2, 0, 0], scale: 2.0, color: PALETTE.amber, emit: 2.6, flat: false });
+
+  const clips = {
+    idle: (() => {
+      const c = new Clip('idle', 5.0);
+      c.track('core', 'rot', [[0, 0, 0, 0], [2.5, 0.2, 0.4, 0.1], [5.0, 0, 0, 0]]);
+      c.track('jawT', 'rot', [[0, 0, 0, 0], [2.5, -0.08, 0, 0], [5.0, 0, 0, 0]]);
+      c.track('jawB', 'rot', [[0, 0, 0, 0], [2.5, 0.08, 0, 0], [5.0, 0, 0, 0]]);
+      c.track('eye', 'scale', [[0, 0.2, 0.2, 0.2], [5.0, 0.2, 0.2, 0.2]]);
+      return c;
+    })(),
+    open: (() => {
+      const c = new Clip('open', 1.2, { loop: false });
+      c.track('jawT', 'rot', [[0, 0, 0, 0], [1.2, -0.62, 0, 0]]);
+      c.track('jawB', 'rot', [[0, 0, 0, 0], [1.2, 0.62, 0, 0]]);
+      c.track('jawT', 'pos', [[0, 0, 0, 0], [1.2, 0, 2.4, 0.6]]);
+      c.track('jawB', 'pos', [[0, 0, 0, 0], [1.2, 0, -2.4, 0.6]]);
+      c.track('eye', 'scale', [[0, 0.2, 0.2, 0.2], [1.2, 1.25, 1.25, 1.25]]);
+      c.track('core', 'scale', [[0, 1, 1, 1], [1.2, 0.94, 0.94, 1.06]]);
+      return c;
+    })(),
+    slam: (() => {
+      const c = new Clip('slam', 1.5, { loop: false });
+      c.track('jawT', 'rot', [[0, -0.62, 0, 0], [0.1, -0.7, 0, 0], [0.22, 0.12, 0, 0], [1.5, 0, 0, 0]]);
+      c.track('jawB', 'rot', [[0, 0.62, 0, 0], [0.1, 0.7, 0, 0], [0.22, -0.12, 0, 0], [1.5, 0, 0, 0]]);
+      c.track('jawT', 'pos', [[0, 0, 2.4, 0.6], [0.22, 0, -0.3, 0], [1.5, 0, 0, 0]]);
+      c.track('jawB', 'pos', [[0, 0, -2.4, 0.6], [0.22, 0, 0.3, 0], [1.5, 0, 0, 0]]);
+      c.track('core', 'scale', [[0, 1, 1, 1], [0.24, 1.16, 0.86, 1.16], [1.5, 1, 1, 1]]);
+      c.track('eye', 'scale', [[0, 1.25, 1.25, 1.25], [0.3, 0.2, 0.2, 0.2], [1.5, 0.2, 0.2, 0.2]]);
+      return c;
+    })(),
+    devour: (() => {
+      const c = new Clip('devour', 1.6);
+      c.track('jawT', 'rot', [[0, -0.7, 0, 0], [0.8, -0.85, 0, 0], [1.6, -0.7, 0, 0]]);
+      c.track('jawB', 'rot', [[0, 0.7, 0, 0], [0.8, 0.85, 0, 0], [1.6, 0.7, 0, 0]]);
+      c.track('jawT', 'pos', [[0, 0, 2.6, 0.6], [1.6, 0, 2.6, 0.6]]);
+      c.track('jawB', 'pos', [[0, 0, -2.6, 0.6], [1.6, 0, -2.6, 0.6]]);
+      c.track('eye', 'scale', [[0, 1.3, 1.3, 1.3], [0.8, 1.6, 1.6, 1.6], [1.6, 1.3, 1.3, 1.3]]);
+      c.track('core', 'rot', [[0, 0, 0, 0], [0.8, 0, 0.3, 0], [1.6, 0, 0, 0]]);
+      return c;
+    })(),
+  };
+  return pack(r, clips, 'maw', { radius: 7.8 });
+}
+
+const RIGGED_BOSSES = {
+  warden: buildRiggedWarden,
+  harrower: buildRiggedHarrower,
+  maw: buildRiggedMaw,
+};
 
 
 // ===== src/render/renderer.js ======================================
@@ -3760,7 +4945,7 @@ class GameCamera {
     if (focus) {
       const fx2 = focus.x - p.x, fz2 = focus.z - p.z;
       focusSep = Math.sqrt(fx2 * fx2 + fz2 * fz2);
-      const w = clamp01(focusSep / 40) * 0.50;
+      const w = clamp01(focusSep / 36) * 0.46;
       this.target.x += fx2 * w;
       this.target.z += fz2 * w;
     }
@@ -3771,7 +4956,7 @@ class GameCamera {
 
     // pull back when fast or when something huge is on the field
     const speed = Math.sqrt(player.velocity.x * player.velocity.x + player.velocity.z * player.velocity.z);
-    this.targetDistanceScale = 1 + clamp01(speed / 42) * 0.10 + threat * 0.12 + clamp01(focusSep / 40) * 0.55;
+    this.targetDistanceScale = 1 + clamp01(speed / 42) * 0.10 + threat * 0.12 + clamp01(focusSep / 34) * 0.85;
     this.distanceScale = damp(this.distanceScale, this.targetDistanceScale, 0.06, dt);
 
     const ds = this.distanceScale;
@@ -3790,6 +4975,18 @@ class GameCamera {
       this.camera.fov = this.camera.aspect < 1 ? clamp(fov / this.camera.aspect * 0.62, 56, 82) : fov;
       this.camera.updateProjectionMatrix();
     }
+  }
+
+  /**
+   * Keep the chase rig's smoothing state on the player without moving the
+   * camera — used while a cinematic owns the pose, so handing control back
+   * does not swoop from wherever the cinematic ended.
+   */
+  parkTarget(x, z) {
+    this.target.set(x, 0, z);
+    this.smoothTarget.set(x, 0, z);
+    this.distanceScale = 1;
+    this.targetDistanceScale = 1;
   }
 
   /** Snap instantly (run start / restart) so there is no swoop-in. */
@@ -5156,7 +6353,7 @@ const ENEMY_TYPES = {
   skitter: {
     id: 'skitter', name: 'SKITTER', build: buildSkitter, cap: 64,
     hp: 24, speed: 15.5, radius: 0.85, score: 12, shards: 1, contact: 12, tier: 1,
-    color: 0xff3ea5, hover: 0.55, cost: 1,
+    color: 0xff3ea5, hover: 0, cost: 1,
     codex: 'Cheap swarm chassis. Rushes, lunges, detonates. Never fight one — fight the pattern.',
   },
   drone: {
@@ -5174,13 +6371,13 @@ const ENEMY_TYPES = {
   seeder: {
     id: 'seeder', name: 'SEEDER', build: buildSeeder, cap: 14,
     hp: 88, speed: 7.5, radius: 1.25, score: 42, shards: 3, contact: 10, tier: 2,
-    color: 0xffb347, hover: 0.4, cost: 4,
+    color: 0xffb347, hover: 0, cost: 4,
     codex: 'Artillery frame. Lobs shells at where you are going. Standing still is a decision.',
   },
   lancer: {
     id: 'lancer', name: 'LANCER', build: buildLancer, cap: 18,
     hp: 135, speed: 9.0, radius: 1.35, score: 55, shards: 3, contact: 18, tier: 3,
-    color: 0xffb347, hover: 0.3, cost: 5,
+    color: 0xffb347, hover: 0, cost: 5,
     codex: 'Armoured ram. Winds up, then crosses the deck in a heartbeat. Dash sideways, never back.',
   },
   sentinel: {
@@ -5214,16 +6411,25 @@ class Enemies {
     this.grid = new Map();
     this._queryOut = [];
 
+    this.specs = {};
     for (const t of ALL_ENEMY_TYPES) {
-      const spec = t.build();
+      // Rigged types bring a skeleton + compiled clips; the hidden boss proxy
+      // stays a plain static mesh.
+      const spec = RIGGED_ENEMIES[t.id] ? RIGGED_ENEMIES[t.id]() : t.build();
+      this.specs[t.id] = spec;
       this.geos[t.id] = spec.geometry;
       this.pools[t.id] = new Pool(() => {
-        const mat = createNovaMaterial({ rim: 0.95, spec: 0.4, rimColor: t.color, dissolveColor: t.color });
+        const pose = spec.skeleton ? new Pose(spec.skeleton) : null;
+        const mat = createNovaMaterial({ pose, rim: 0.95, spec: 0.4, rimColor: t.color, dissolveColor: t.color });
         const mesh = new THREE.Mesh(spec.geometry, mat);
         mesh.visible = false;
         mesh.frustumCulled = true;
         scene.add(mesh);
-        return { mesh, mat, type: t, id: 0 };
+        return {
+          mesh, mat, type: t, id: 0,
+          pose, animator: pose ? new Animator(pose, spec.clips) : null,
+          spin: 0, animState: '',
+        };
       }, t.cap, (e) => { e.mesh.visible = false; });
     }
   }
@@ -5282,6 +6488,12 @@ class Enemies {
     e.scoreValue = t.score * (elite ? 2.4 : 1);
     e.fromSplit = !!opts.fromSplit;
 
+    if (e.animator) {
+      e.animator.reset();
+      e.animState = '';
+      e.spin = Math.random() * TAU;
+      this._drivePose(e, 0);
+    }
     e.mesh.visible = true;
     e.mesh.position.set(x, e.y, z);
     e.mesh.rotation.set(0, e.yaw, 0);
@@ -5391,6 +6603,7 @@ class Enemies {
 
       if (e.dying) {
         if (e.type.hidden) { this._remove(e, i); continue; }
+        if (e.animator) e.animator.update(dt * 0.35);
         e.spawnT += dt / 0.35;
         e.mat.uniforms.uDissolve.value = clamp01(e.spawnT);
         e.mesh.position.y = e.y + e.spawnT * 0.6;
@@ -5415,6 +6628,7 @@ class Enemies {
       if (e.type.hidden) { this._contact(e, dt, p); continue; }
       this._integrate(e, dt);
       this._contact(e, dt, p);
+      if (e.animator) { this._drivePose(e, dt); e.animator.update(dt); }
       this._sync(e, dt);
     }
   }
@@ -5470,6 +6684,73 @@ class Enemies {
     }
   }
 
+  /**
+   * Map AI state onto animation clips. Clips are only re-played when the state
+   * actually changes, so crossfades are not restarted every frame.
+   */
+  _drivePose(e, dt) {
+    const a = e.animator;
+    e.spin += dt;
+    const speed = Math.hypot(e.vx, e.vz);
+    const moving = speed > 1.4;
+    const set = (name, opts) => {
+      if (e.animState === name) return;
+      e.animState = name;
+      a.play(name, opts);
+    };
+
+    switch (e.typeId) {
+      case 'skitter': {
+        if (e.state === 'lunge') set('lunge', { fade: 0.05, speed: 1.1 });
+        else if (moving) {
+          set('scuttle', { fade: 0.12 });
+          a.speed = clamp(speed / 9, 0.65, 2.4);
+        } else set('idle', { fade: 0.2 });
+        break;
+      }
+      case 'drone': {
+        if (a.playing === 'fire' && !a.finished) break;
+        set('hover', { fade: 0.15 });
+        a.offsetRot('ring', 0, e.spin * 2.2, 0);
+        a.offsetRot('body', 0, 0, clamp(-e.vx * 0.02, -0.35, 0.35));
+        break;
+      }
+      case 'splitter': {
+        const near = this.game.player.alive
+          && lengthXZ(this.game.player.position.x - e.x, this.game.player.position.z - e.z) < 13;
+        set(near ? 'strain' : 'idle', { fade: 0.25 });
+        a.offsetRot('core', e.spin * 0.9, e.spin * 1.3, 0);
+        break;
+      }
+      case 'seeder': {
+        if (a.playing === 'fire' && !a.finished) break;
+        set('idle', { fade: 0.2 });
+        break;
+      }
+      case 'lancer': {
+        if (e.state === 'windup') set('windup', { fade: 0.12 });
+        else if (e.state === 'charge') set('charge', { fade: 0.08, speed: 1.6 });
+        else if (e.state === 'stunned') set('stunned', { fade: 0.14 });
+        else {
+          set('prowl', { fade: 0.2 });
+          a.speed = clamp(0.55 + speed / 10, 0.55, 2.0);
+        }
+        break;
+      }
+      case 'sentinel': {
+        if (e.state === 'charging') set('brace', { fade: 0.16 });
+        else if (e.state === 'firing') set('fire', { fade: 0.05 });
+        else {
+          set('walk', { fade: 0.22 });
+          a.speed = clamp(0.35 + speed / 6, 0.35, 1.8);
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
   _chargeCrash(e) {
     const g = this.game;
     g.fx.dust(e.x, e.z, 4, 0xffb347, 12);
@@ -5508,20 +6789,12 @@ class Enemies {
     if (e.type.hover > 0.2) y += Math.sin(e.bob * 2.2 + e.wobble) * 0.22;
     e.y = y;
     e.mesh.position.set(e.x, y, e.z);
-    const moveYaw = (Math.abs(e.vx) + Math.abs(e.vz) > 0.6) ? Math.atan2(e.vx, e.vz) : e.yaw;
     if (e.typeId === 'splitter') {
-      e.mesh.rotation.y += dt * 1.4;
-      e.mesh.rotation.x += dt * 0.7;
-    } else if (e.typeId === 'skitter') {
-      e.mesh.rotation.y = e.yaw;
-      e.mesh.rotation.z = Math.sin(e.bob * 12) * 0.14;
-      const squash = e.state === 'lunge' ? 1.25 : 1;
-      e.mesh.scale.set(e.scale * (2 - squash), e.scale * squash, e.scale * squash);
-    } else if (e.typeId === 'drone') {
-      e.mesh.rotation.y = e.yaw;
-      e.mesh.rotation.z = damp(e.mesh.rotation.z, clamp(-e.vx * 0.02, -0.4, 0.4), 0.0006, dt);
+      e.mesh.rotation.y += dt * 0.9;
+      e.mesh.rotation.x = Math.sin(e.bob * 0.8) * 0.25;
     } else {
       e.mesh.rotation.y = e.yaw;
+      e.mesh.rotation.z = 0;
     }
     // charging tells: the body glows hotter as the attack lands
     if (e.state === 'windup' || e.state === 'charging') {
@@ -5710,6 +6983,7 @@ const AI = {
       });
       g.fx.muzzle(e.x, e.y - 0.1, e.z, dx / l, dz / l, e.type.color, 0.7);
       g.audio.play('enemyShoot', { gain: 0.5 });
+      if (e.animator) { e.animator.play('fire', { fade: 0.04, restart: true }); e.animState = 'fire'; }
     }
   },
 
@@ -5738,6 +7012,7 @@ const AI = {
       });
       g.audio.play('mortar', { gain: 0.6 });
       g.fx.muzzle(e.x, e.y + 1.6, e.z, 0, 0, 0xffb347, 1);
+      if (e.animator) { e.animator.play('fire', { fade: 0.04, restart: true }); e.animState = 'fire'; }
       if (e.elite) {
         const a2 = Math.random() * TAU;
         g.projectiles.fireMortar(e.x, e.y + 1.4, e.z, tx + Math.cos(a2) * 6, tz + Math.sin(a2) * 6, {
@@ -6250,18 +7525,24 @@ class Player {
     this.alive = true;
 
     this.group = new THREE.Group();
-    this.hullMat = createNovaMaterial({ rim: 0.85, spec: 0.6, rimColor: 0x8ff0ff });
     this.meshes = {};
     this._shipGeos = {};
+    // Each chassis gets its own rig instance and material: the bone uniform is
+    // per-material, so they cannot share one.
     for (const id of Object.keys(SHIPS)) {
-      const spec = buildShip(id);
+      const spec = buildRiggedShip(id);
       this._shipGeos[id] = spec.geometry;
-      const m = new THREE.Mesh(spec.geometry, this.hullMat);
+      const pose = new Pose(spec.skeleton);
+      const mat = createNovaMaterial({ pose, rim: 0.85, spec: 0.6, rimColor: 0x8ff0ff });
+      const m = new THREE.Mesh(spec.geometry, mat);
       m.visible = false;
+      m.frustumCulled = false;
       this.group.add(m);
-      this.meshes[id] = { mesh: m, glow: spec.glow };
+      this.meshes[id] = { mesh: m, glow: spec.glow, pose, mat, animator: new Animator(pose, spec.clips) };
     }
     this.body = null;
+    this.hullMat = this.meshes.striker.mat;
+    this.animator = this.meshes.striker.animator;
 
     this.shieldMat = createEnergyMaterial({ color: 0x46e6ff, opacity: 0.0, power: 3.6, pulse: 0.1 });
     this.shieldMesh = new THREE.Mesh(new THREE.SphereGeometry(2.05, 20, 14), this.shieldMat);
@@ -6313,6 +7594,13 @@ class Player {
     entry.mesh.visible = true;
     this.body = entry.mesh;
     this.glowColor = entry.glow;
+    this.hullMat = entry.mat;
+    this.animator = entry.animator;
+    this.animator.reset();
+    this.animState = '';
+    this.recoil = 0;
+    this.warpIn = 0;
+    this.hullMat.uniforms.uDissolve.value = 0;
     this.hullMat.uniforms.uRimColor.value.set(entry.glow);
     this.shieldMat.uniforms.uColor.value.set(entry.glow);
     this.ringMat.uniforms.uColor.value.set(entry.glow);
@@ -6385,6 +7673,12 @@ class Player {
     if (this.stats.maxHull > prevMaxHull) this.hull += this.stats.maxHull - prevMaxHull;
     if (mod.onTake) mod.onTake(this);
     return true;
+  }
+
+  /** Materialise the hull over ~1.2s; used by the deployment cinematic. */
+  beginWarpIn() {
+    this.warpIn = 1.25;
+    this.hullMat.uniforms.uDissolve.value = 1;
   }
 
   get speed() { return lengthXZ(this.velocity.x, this.velocity.z); }
@@ -6559,6 +7853,7 @@ class Player {
     }
     this.shotsFired += n;
 
+    this.recoil = 1;
     g.fx.muzzle(px, HOVER_Y, pz, this.aimDir.x, this.aimDir.z, od ? 0xffc24a : this.glowColor, od ? 1.3 : 1);
     g.audio.play('shoot', { gain: 0.85, pitch: od ? 1.18 : 1 });
     this.velocity.x -= this.aimDir.x * 1.1;
@@ -6817,9 +8112,37 @@ class Player {
 
   _syncGuardians(dt, force) { this._updateGuardians(force ? 0 : dt); }
 
+  /** Map flight state onto ship clips, then layer the weapon recoil. */
+  _driveAnim(dt) {
+    const a = this.animator;
+    if (!a) return;
+    const set = (name, opts) => {
+      if (this.animState === name) return;
+      this.animState = name;
+      a.play(name, opts);
+    };
+    if (this.dashTimer > 0) set('dash', { fade: 0.05 });
+    else if (this.overdriveActive > 0) set('overdrive', { fade: 0.2 });
+    else if (this.speed > this.stats.moveSpeed * 0.25) set('cruise', { fade: 0.22 });
+    else set('idle', { fade: 0.3 });
+
+    this.recoil = Math.max(0, this.recoil - dt * 7);
+    if (this.recoil > 0) {
+      a.offsetPos('nose', 0, 0, this.recoil * 0.3);
+      a.offsetRot('hull', -this.recoil * 0.05, 0, 0);
+    }
+    // bank the wings with lateral motion for a bit of extra life
+    const fwdX = Math.sin(this.yaw), fwdZ = Math.cos(this.yaw);
+    const lateral = clamp((this.velocity.x * fwdZ - this.velocity.z * fwdX) * 0.012, -0.3, 0.3);
+    a.offsetRot('wingL', 0, 0, -lateral);
+    a.offsetRot('wingR', 0, 0, -lateral);
+    a.update(dt);
+  }
+
   _updateVisual(dt, dead) {
     if (dead) return;
     const g = this.game;
+    this._driveAnim(dt);
     this.bob += dt;
     const bobY = Math.sin(this.bob * 2.6) * 0.07;
     this.group.position.set(this.position.x, this.position.y + bobY, this.position.z);
@@ -6857,6 +8180,18 @@ class Player {
     this.shieldMat.uniforms.uColor.value.lerp(
       this._tmpColor || (this._tmpColor = new THREE.Color()).set(this.glowColor), 0);
 
+    if (this.warpIn > 0) {
+      this.warpIn = Math.max(0, this.warpIn - dt);
+      this.hullMat.uniforms.uDissolve.value = clamp01(this.warpIn / 1.25);
+      if (Math.random() < 0.5) {
+        g.fx.glow.spawn({
+          x: this.position.x + (Math.random() - 0.5) * 4, y: 0.4 + Math.random() * 2.4,
+          z: this.position.z + (Math.random() - 0.5) * 4, vy: 3 + Math.random() * 4,
+          color: 0xffffff, color2: this.glowColor, size: 0.6, size2: 0, life: 0.45, alpha: 0.9, drag: 1.6,
+        });
+      }
+    }
+
     // hit flash + invulnerability shimmer
     const flashU = this.hullMat.uniforms.uFlash;
     flashU.value = damp(flashU.value, 0, 0.00005, dt);
@@ -6869,7 +8204,7 @@ class Player {
 
   dispose() {
     for (const id in this._shipGeos) this._shipGeos[id].dispose();
-    this.hullMat.dispose();
+    for (const id in this.meshes) this.meshes[id].mat.dispose();
     this.shieldMesh.geometry.dispose();
     this.shieldMat.dispose();
     this.groundRing.geometry.dispose();
@@ -7087,10 +8422,12 @@ class BossManager {
     this.root = new THREE.Group();
     this.root.visible = false;
     scene.add(this.root);
-    this.mat = createNovaMaterial({ rim: 0.9, spec: 0.5, rimColor: 0xff6ec7, dissolveColor: 0xff3ea5 });
     this.coreMat = createEnergyMaterial({ color: 0xff3ea5, opacity: 0.5, power: 1.8, pulse: 0.3 });
-    this.parts = {};
     this._built = {};
+    this.mat = null;
+    this.anim = null;
+    this.pose = null;
+    this.mesh = null;
     this.proxy = null;
     this.hazards = [];
     this.beams = [];
@@ -7100,52 +8437,16 @@ class BossManager {
 
   _ensureBuilt(kind) {
     if (this._built[kind]) return this._built[kind];
-    let group = new THREE.Group();
-    const parts = {};
-    if (kind === 'warden') {
-      const m = buildWarden();
-      parts.core = new THREE.Mesh(m.core, this.mat);
-      parts.ring = new THREE.Mesh(m.ring, this.mat);
-      parts.plates = [];
-      for (let i = 0; i < 4; i++) {
-        const p = new THREE.Mesh(m.plate, this.mat);
-        parts.plates.push(p);
-        group.add(p);
-      }
-      parts.turrets = [];
-      for (let i = 0; i < 2; i++) {
-        const t = new THREE.Mesh(m.turret, this.mat);
-        parts.turrets.push(t);
-        group.add(t);
-      }
-      group.add(parts.core, parts.ring);
-      parts.geos = [m.core, m.ring, m.plate, m.turret];
-    } else if (kind === 'harrower') {
-      const m = buildHarrower();
-      parts.core = new THREE.Mesh(m.core, this.mat);
-      parts.arms = [];
-      for (let i = 0; i < 2; i++) {
-        const a = new THREE.Mesh(m.arm, this.mat);
-        parts.arms.push(a);
-        group.add(a);
-      }
-      group.add(parts.core);
-      parts.geos = [m.core, m.arm];
-    } else {
-      const m = buildMaw();
-      parts.core = new THREE.Mesh(m.core, this.mat);
-      parts.jaws = [];
-      for (let i = 0; i < 2; i++) {
-        const j = new THREE.Mesh(m.jaw, this.mat);
-        parts.jaws.push(j);
-        group.add(j);
-      }
-      parts.eye = new THREE.Mesh(m.eye, this.mat);
-      group.add(parts.core, parts.eye);
-      parts.geos = [m.core, m.jaw, m.eye];
-    }
-    this._built[kind] = { group, parts };
-    return this._built[kind];
+    const spec = RIGGED_BOSSES[kind]();
+    const pose = new Pose(spec.skeleton);
+    const mat = createNovaMaterial({
+      pose, rim: 0.9, spec: 0.5, rimColor: 0xff6ec7, dissolveColor: 0xff3ea5,
+    });
+    const mesh = new THREE.Mesh(spec.geometry, mat);
+    mesh.frustumCulled = false;
+    const built = { spec, pose, mat, mesh, anim: new Animator(pose, spec.clips) };
+    this._built[kind] = built;
+    return built;
   }
 
   spawn(kind, hpScale = 1) {
@@ -7155,9 +8456,13 @@ class BossManager {
     this.despawn(true);
 
     const built = this._ensureBuilt(kind);
-    this.group = built.group;
-    this.parts = built.parts;
-    this.root.add(this.group);
+    this.mesh = built.mesh;
+    this.mat = built.mat;
+    this.pose = built.pose;
+    this.anim = built.anim;
+    this.anim.reset();
+    this.animState = '';
+    this.root.add(this.mesh);
     this.root.visible = true;
     this.kind = kind;
     this.def = def;
@@ -7181,6 +8486,7 @@ class BossManager {
     this.invuln = 2.2;
     this.spin = 0;
     this.jaw = 0;
+    this.mouthOpen = false;
     this.armAngle = 0;
     this.hazards.length = 0;
 
@@ -7211,7 +8517,7 @@ class BossManager {
   }
 
   despawn(quiet = false) {
-    if (this.group) { this.root.remove(this.group); this.group = null; }
+    if (this.mesh) { this.root.remove(this.mesh); this.mesh = null; }
     this.root.visible = false;
     this.active = false;
     this.state = 'gone';        // lets the wave director know the fight is over
@@ -7281,7 +8587,7 @@ class BossManager {
 
   // ------------------------------------------------------------------
   update(dt) {
-    if (!this.group) return;
+    if (!this.mesh) return;
     const g = this.game;
     const p = g.player;
     this.time += dt;
@@ -7291,8 +8597,8 @@ class BossManager {
     fu.value = damp(fu.value, 0, 0.00002, dt);
 
     if (this.state === 'entry') {
-      this.mat.uniforms.uDissolve.value = clamp01(1 - this.stateTime / 1.8);
-      this.z = lerp(-26, -12, clamp01(this.stateTime / 2.2));
+      this.mat.uniforms.uDissolve.value = clamp01(1 - this.stateTime / 0.9);
+      this.z = lerp(-26, -14, clamp01(this.stateTime / 2.2));
       if (this.stateTime > 2.2) { this.state = 'idle'; this.stateTime = 0; this.mat.uniforms.uDissolve.value = 0; }
     } else if (this.state === 'dying') {
       this.mat.uniforms.uDissolve.value = clamp01(this.stateTime / 2.4);
@@ -7445,62 +8751,58 @@ class BossManager {
     }
   }
 
+  /** Ask the rig to play a clip, ignoring redundant re-triggers. */
+  playClip(name, opts = {}) {
+    if (!this.anim) return;
+    if (this.animState === name && !opts.restart) return;
+    this.animState = name;
+    this.anim.play(name, opts);
+  }
+
   _animate(dt, p) {
     const t = this.time;
     this.root.position.set(this.x, this.y + Math.sin(t * 0.9) * 0.35, this.z);
     this.root.rotation.y = this.yaw;
-    const P = this.parts;
+    const a = this.anim;
+    if (!a) return;
+
+    // continuous spins read better as overlays than as clip keys, which would
+    // need a key every few degrees to avoid easing artefacts
+    this.spin += dt * (0.5 + this.phase * 0.2);
     if (this.kind === 'warden') {
-      this.spin += dt * (0.5 + this.phase * 0.25);
-      P.ring.rotation.y = this.spin;
-      P.ring.rotation.x = Math.sin(t * 0.4) * 0.18;
-      P.core.rotation.y -= dt * 0.6;
-      P.core.rotation.x = Math.sin(t * 0.7) * 0.1;
-      P.plates.forEach((pl, i) => {
-        const a = this.spin * 1.4 + (i / P.plates.length) * TAU;
-        const r = 7.4 + Math.sin(t * 1.2 + i) * 0.5;
-        pl.position.set(Math.cos(a) * r, Math.sin(t * 1.1 + i * 2) * 1.2, Math.sin(a) * r);
-        pl.rotation.set(0, -a + Math.PI / 2, Math.sin(t + i) * 0.2);
-      });
-      P.turrets.forEach((tu, i) => {
-        const a = -this.spin * 0.8 + i * Math.PI;
-        tu.position.set(Math.cos(a) * 4.6, -1.6, Math.sin(a) * 4.6);
-        const dx = p.position.x - (this.x + tu.position.x), dz = p.position.z - (this.z + tu.position.z);
-        tu.rotation.y = Math.atan2(dx, dz) - this.yaw;
-      });
+      a.offsetRot('ring', 0, this.spin * 1.15, 0);
+      a.offsetRot('halo', this.spin * 0.4, this.spin * -0.7, 0);
+      a.offsetRot('core', 0, -this.spin * 0.8, 0);
+      // turrets track the pilot
+      if (p && p.alive) {
+        const aim = Math.atan2(p.position.x - this.x, p.position.z - this.z) - this.yaw;
+        a.offsetRot('turretL', 0, aim - Math.PI / 2, 0);
+        a.offsetRot('turretR', 0, aim + Math.PI / 2, 0);
+      }
     } else if (this.kind === 'harrower') {
-      this.armAngle += dt * (this.state === 'attack' ? 0.2 : 0.7);
-      P.arms.forEach((arm, i) => {
-        const side = i === 0 ? -1 : 1;
-        const swing = this._atkData && this._atkData.armAngle !== undefined ? this._atkData.armAngle * side : Math.sin(this.armAngle + i) * 0.35;
-        arm.position.set(side * 3.4, 0.4, -0.5);
-        arm.rotation.set(0, swing, 0);
-      });
-      P.core.rotation.z = damp(P.core.rotation.z, this.state === 'attack' && this.currentAttack && this.currentAttack.id === 'chargeRun' ? -0.25 : 0, 0.01, dt);
+      a.offsetRot('core', 0, 0, Math.sin(t * 0.8) * 0.05);
     } else {
-      this.spin += dt * 0.25;
-      P.core.rotation.y = this.spin;
-      P.core.rotation.x = Math.sin(t * 0.5) * 0.12;
-      const openTarget = this.jaw;
-      P.jaws.forEach((j, i) => {
-        const side = i === 0 ? 1 : -1;
-        j.position.set(0, side * (2.6 + openTarget * 2.6), -3.4);
-        j.rotation.set(side * (0.25 + openTarget * 0.55), 0, side > 0 ? 0 : Math.PI);
-      });
-      P.eye.position.set(0, 0, -4.2);
-      P.eye.scale.setScalar(0.8 + this.jaw * 0.7);
-      P.eye.visible = this.jaw > 0.05;
-      this.damageMult = this.jaw > 0.5 ? 1.9 : 1;
+      a.offsetRot('ring', this.spin * 0.25, this.spin * 0.6, 0);
+      a.offsetRot('core', 0, this.spin * 0.35, 0);
+      // the eye is only exposed while the jaws are wide: that is the weak point
+      const open = this.animState === 'open' || this.animState === 'devour';
+      this.mouthOpen = open && a.time > 0.55;
+      this.damageMult = this.mouthOpen ? 1.9 : 1;
     }
+
+    if (this.state === 'idle' || this.state === 'phase' || this.state === 'entry') {
+      this.playClip('idle', { fade: 0.3 });
+    }
+    a.update(dt);
   }
 
   dispose() {
     this.despawn(true);
     for (const k in this._built) {
       const b = this._built[k];
-      b.parts.geos.forEach((g) => g.dispose());
+      b.spec.geometry.dispose();
+      b.mat.dispose();
     }
-    this.mat.dispose();
     this.coreMat.dispose();
     if (this.root.parent) this.root.parent.remove(this.root);
   }
@@ -7513,7 +8815,7 @@ const ATTACKS = {
   warden: [
     {
       id: 'radial', phase: 1, weight: 30, cooldown: 1.9, maxTime: 3.4,
-      start: (b) => { b._atkData.fired = 0; b._atkData.offset = Math.random() * TAU; },
+      start: (b) => { b._atkData.fired = 0; b._atkData.offset = Math.random() * TAU; b.playClip('barrage', { fade: 0.12, restart: true }); },
       run: (b, g, p, dt) => {
         const volleys = b.phase >= 3 ? 5 : 3;
         const gap = 0.42;
@@ -7528,7 +8830,7 @@ const ATTACKS = {
     },
     {
       id: 'spiral', phase: 1, weight: 24, cooldown: 2.2, maxTime: 4.6,
-      start: (b) => { b._atkData.a = 0; b._atkData.next = 0; },
+      start: (b) => { b._atkData.a = 0; b._atkData.next = 0; b.playClip('barrage', { fade: 0.2, restart: true }); },
       run: (b, g, p, dt) => {
         const d = b._atkData;
         d.a += dt * (b.phase >= 3 ? 3.4 : 2.4);
@@ -7551,6 +8853,7 @@ const ATTACKS = {
       id: 'slam', phase: 1, weight: 20, cooldown: 2.0, maxTime: 4.0,
       start: (b, g) => {
         b._atkData.telegraph = g.decals.acquire(b.x, b.z, 15, 0xff3ea5, { fill: 0.7, thickness: 0.12, opacity: 0.9 });
+        b.playClip('slam', { fade: 0.08, restart: true });
         g.audio.play('charge', { dur: 1.1 });
       },
       run: (b, g, p, dt) => {
@@ -7582,6 +8885,7 @@ const ATTACKS = {
           const r = 16 + Math.random() * 10;
           g.spawnEnemyAt(b.phase >= 2 && i % 2 === 0 ? 'drone' : 'skitter', Math.cos(a) * r, Math.sin(a) * r);
         }
+        b.playClip('summon', { fade: 0.1, restart: true });
         g.audio.play('rift');
       },
       run: (b) => b.attackTime > 0.8,
@@ -7623,6 +8927,7 @@ const ATTACKS = {
         b._atkData.dir = Math.random() < 0.5 ? 1 : -1;
         b._atkData.angle = -1.1 * b._atkData.dir;
         for (let i = 0; i < 2; i++) b.beams.push(g.beams.acquire(0xff3ea5));
+        b.playClip('sweep', { fade: 0.12, restart: true });
         g.audio.play('charge', { dur: 1.0 });
       },
       run: (b, g, p, dt) => {
@@ -7655,6 +8960,7 @@ const ATTACKS = {
         const d = lengthXZ(dx, dz) || 1;
         b._atkData.dx = dx / d; b._atkData.dz = dz / d;
         b._atkData.telegraph = g.decals.acquire(b.x + dx / d * 22, b.z + dz / d * 22, 4.5, 0xffb347, { fill: 0.5, thickness: 0.16, opacity: 0.85 });
+        b.playClip('charge', { fade: 0.14, restart: true });
         g.audio.play('charge', { dur: 0.9 });
       },
       run: (b, g, p, dt) => {
@@ -7697,7 +9003,7 @@ const ATTACKS = {
     },
     {
       id: 'volley', phase: 1, weight: 22, cooldown: 1.7, maxTime: 3.2,
-      start: (b) => { b._atkData.n = 0; },
+      start: (b) => { b._atkData.n = 0; b.playClip('volley', { fade: 0.08, restart: true }); },
       run: (b, g, p, dt) => {
         const d = b._atkData;
         const shots = b.phase >= 3 ? 5 : 3;
@@ -7737,14 +9043,13 @@ const ATTACKS = {
   maw: [
     {
       id: 'slamWave', phase: 1, weight: 28, cooldown: 1.8, maxTime: 4.4,
-      start: (b, g) => { b._atkData.rings = 0; g.audio.play('charge', { dur: 1.0 }); },
+      start: (b, g) => { b._atkData.rings = 0; b.playClip('open', { fade: 0.1, restart: true }); g.audio.play('charge', { dur: 1.0 }); },
       run: (b, g, p, dt) => {
         const d = b._atkData;
-        b.jaw = clamp01(b.attackTime / 0.95);
         if (b.attackTime < 0.95) return false;
         if (!d.slammed) {
           d.slammed = true;
-          b.jaw = 0;
+          b.playClip('slam', { fade: 0.04, restart: true });
           g.screen.addTrauma(0.85);
           g.screen.stop(0.07);
           g.audio.play('explosion', { size: 1.6 });
@@ -7761,7 +9066,7 @@ const ATTACKS = {
         }
         return t > waves * 0.38 + 0.4;
       },
-      end: (b) => { b.jaw = 0; },
+      end: (b) => { b.playClip('idle', { fade: 0.25 }); },
     },
     {
       id: 'spikeVolley', phase: 1, weight: 26, cooldown: 1.6, maxTime: 4.0,
@@ -7793,10 +9098,9 @@ const ATTACKS = {
     },
     {
       id: 'devour', phase: 2, weight: 24, cooldown: 2.4, maxTime: 5.0,
-      start: (b, g) => { g.audio.play('charge', { dur: 1.4 }); b.jaw = 0; },
+      start: (b, g) => { g.audio.play('charge', { dur: 1.4 }); b.playClip('open', { fade: 0.12, restart: true }); },
       run: (b, g, p, dt) => {
-        const k = clamp01(b.attackTime / 1.2);
-        b.jaw = k;
+        if (b.attackTime > 1.15) b.playClip('devour', { fade: 0.18 });
         if (b.attackTime > 1.2 && p.alive) {
           // vacuum: pulls the player in while the eye is exposed
           const dx = b.x - p.position.x, dz = b.z - p.position.z;
@@ -7811,10 +9115,10 @@ const ATTACKS = {
           });
           if (Math.random() < dt * 6) b.fireAimed(g, p, 3, 0.5, 24, 8, { color: 0xa06bff });
         }
-        if (b.attackTime > 3.4) { b.jaw = damp(b.jaw, 0, 0.001, dt); }
+        if (b.attackTime > 3.4) b.playClip('idle', { fade: 0.3 });
         return b.attackTime > 4.0;
       },
-      end: (b) => { b.jaw = 0; },
+      end: (b) => { b.playClip('idle', { fade: 0.25 }); },
     },
     {
       id: 'spawnBrood', phase: 1, weight: 16, cooldown: 2.6, maxTime: 2.4,
@@ -7834,7 +9138,7 @@ const ATTACKS = {
       start: (b, g) => {
         b._atkData.a = b.yaw - 1.4;
         b.beams.push(g.beams.acquire(0xffe36e));
-        b.jaw = 1;
+        b.playClip('open', { fade: 0.1, restart: true });
         g.audio.play('charge', { dur: 1.2 });
       },
       run: (b, g, p, dt) => {
@@ -7851,11 +9155,269 @@ const ATTACKS = {
         }
         return b.attackTime > 4.6;
       },
-      end: (b, g) => { for (const bm of b.beams) g.beams.release(bm); b.beams.length = 0; b.jaw = 0; },
+      end: (b, g) => { for (const bm of b.beams) g.beams.release(bm); b.beams.length = 0; b.playClip('idle', { fade: 0.3 }); },
     },
   ],
 };
 
+
+
+// ===== src/systems/director.js =====================================
+/**
+ * director.js — cinematic camera sequences.
+ *
+ * A cinematic is a keyframe track over camera position/target/FOV plus a few
+ * presentation channels (letterbox, time scale, input lock) and one-shot cues.
+ * The game camera hands over control while one runs and takes it back cleanly.
+ *
+ * Keyframes are absolute times; values interpolate with a smoothstep so the
+ * camera eases rather than snapping between poses.
+ */
+
+const _dirVec = new THREE.Vector3();
+
+class Director {
+  constructor(game) {
+    this.game = game;
+    this.active = null;
+    this.time = 0;
+    this.camPos = new THREE.Vector3();
+    this.camTarget = new THREE.Vector3();
+    this.fov = 56;
+    this.letterbox = 0;
+    this.lockInput = false;
+    this._fired = new Set();
+    this.onComplete = null;
+  }
+
+  get running() { return this.active !== null; }
+
+  /** Skip whatever is playing (used by pause/restart/abort). */
+  cancel() {
+    if (!this.active) return;
+    this.active = null;
+    this.letterbox = 0;
+    this.lockInput = false;
+    this._fired.clear();
+    this.onComplete = null;
+    this.game.screen.targetTimeScale = 1;
+    this.game.ui.setLetterbox(0);
+  }
+
+  /** Finish early (player pressed something). Runs the completion callback. */
+  trySkip() {
+    if (!this.active || !this.active.skippable || this.time < 0.5) return false;
+    const cb = this.onComplete;
+    this.cancel();
+    if (cb) cb();
+    return true;
+  }
+
+  play(sequence, onComplete) {
+    this.active = sequence;
+    this.time = 0;
+    this._fired.clear();
+    this.onComplete = onComplete || null;
+    this.update(0);
+  }
+
+  /** Locate the keyframe pair bracketing the current time. */
+  _bracket(frames) {
+    let a = frames[0], b = frames[frames.length - 1];
+    for (let i = 0; i < frames.length - 1; i++) {
+      if (this.time >= frames[i].t && this.time <= frames[i + 1].t) { a = frames[i]; b = frames[i + 1]; break; }
+      if (this.time > frames[i].t) { a = frames[i]; b = frames[Math.min(i + 1, frames.length - 1)]; }
+    }
+    const span = b.t - a.t;
+    const k = span > 0 ? smoothstep(clamp01((this.time - a.t) / span)) : 1;
+    return { a, b, k };
+  }
+
+  /** Sample a scalar channel. */
+  _sample(frames, key) {
+    const { a, b, k } = this._bracket(frames);
+    const av = a[key];
+    if (av === undefined) return null;
+    const bv = b[key] === undefined ? av : b[key];
+    return lerp(av, bv, k);
+  }
+
+  /**
+   * Sample a positional channel. Frames are offsets from the sequence's live
+   * anchor (a moving boss, say) unless flagged `abs`, so a reveal keeps its
+   * subject framed even while the subject is still flying in. Each keyframe is
+   * resolved to world space before interpolation, which lets one track mix
+   * anchored and absolute poses.
+   */
+  _sampleVec(frames, key, anchor, out) {
+    const { a, b, k } = this._bracket(frames);
+    if (a[key] === undefined) return null;
+    const bv = b[key] === undefined ? a[key] : b[key];
+    const ax = a.abs || !anchor ? 0 : anchor.x;
+    const ay = a.abs || !anchor ? 0 : anchor.y;
+    const az = a.abs || !anchor ? 0 : anchor.z;
+    const bx = b.abs || !anchor ? 0 : anchor.x;
+    const by = b.abs || !anchor ? 0 : anchor.y;
+    const bz = b.abs || !anchor ? 0 : anchor.z;
+    out.set(
+      lerp(a[key][0] + ax, bv[0] + bx, k),
+      lerp(a[key][1] + ay, bv[1] + by, k),
+      lerp(a[key][2] + az, bv[2] + bz, k),
+    );
+    return out;
+  }
+
+  update(dtReal) {
+    if (!this.active) return;
+    const seq = this.active;
+    this.time += dtReal;
+
+    if (seq.frames) {
+      const anchor = seq.anchor ? seq.anchor() : null;
+      if (this._sampleVec(seq.frames, 'pos', anchor, this.camPos) === null) this.camPos.set(0, 30, 30);
+      this._sampleVec(seq.frames, 'target', anchor, this.camTarget);
+      const f = this._sample(seq.frames, 'fov');
+      if (f !== null) this.fov = f;
+      const lb = this._sample(seq.frames, 'letterbox');
+      this.letterbox = lb === null ? 0 : lb;
+      const ts = this._sample(seq.frames, 'timeScale');
+      this.game.screen.targetTimeScale = ts === null ? 1 : ts;
+    }
+
+    for (const cue of seq.cues || []) {
+      if (this.time >= cue.t && !this._fired.has(cue)) {
+        this._fired.add(cue);
+        try { cue.run(this.game); } catch (e) { console.warn('[director] cue failed', e); }
+      }
+    }
+
+    this.lockInput = this.time < (seq.lockUntil === undefined ? seq.duration : seq.lockUntil);
+    this.game.ui.setLetterbox(this.letterbox);
+
+    if (this.time >= seq.duration) {
+      const cb = this.onComplete;
+      this.cancel();
+      if (cb) cb();
+    }
+  }
+
+  /** Apply the cinematic pose to the real camera. */
+  applyTo(camera) {
+    camera.position.copy(this.camPos);
+    camera.lookAt(this.camTarget);
+    if (Math.abs(camera.fov - this.fov) > 0.01) {
+      camera.fov = this.fov;
+      camera.updateProjectionMatrix();
+    }
+  }
+}
+
+// ======================================================================
+//  Sequences
+// ======================================================================
+
+/** Deployment: a wide sweep that settles into the normal chase pose. */
+function runStartSequence(px, pz) {
+  return {
+    name: 'runStart',
+    skippable: true,
+    duration: 3.1,
+    lockUntil: 2.6,
+    frames: [
+      { t: 0.0, abs: 1, pos: [px + 46, 6, pz + 52], target: [px, 2, pz], fov: 44, letterbox: 1 },
+      { t: 1.3, abs: 1, pos: [px + 16, 14, pz + 34], target: [px, 1.4, pz], fov: 50, letterbox: 1 },
+      { t: 2.4, abs: 1, pos: [px + 2, 24, pz + 24], target: [px, 1.0, pz], fov: 56, letterbox: 0.35 },
+      { t: 3.1, abs: 1, pos: [px, 26.5, pz + 19.5], target: [px, 0.6, pz], fov: 56, letterbox: 0 },
+    ],
+    cues: [
+      { t: 0.0, run: (g) => { g.player.beginWarpIn(); g.audio.play('rift', { gain: 0.8 }); } },
+      { t: 0.55, run: (g) => { g.ui.banner('STABILIZER SEVEN', 'HOLD THE DECK', ''); } },
+      {
+        t: 1.35,
+        run: (g) => {
+          const p = g.player.position;
+          g.rings.spawn(p.x, p.z, { color: g.player.glowColor, from: 0.5, to: 14, duration: 0.8, thickness: 0.12 });
+          g.fx.column(p.x, p.z, g.player.glowColor, 9, 30);
+          g.world.addRipple(p.x, p.z, 1.4);
+          g.audio.play('overdrive', { gain: 0.5 });
+        },
+      },
+    ],
+  };
+}
+
+/** Boss arrival: letterboxed low-angle push-in on the new threat. */
+function bossIntroSequence(boss, px, pz) {
+  return {
+    name: 'bossIntro',
+    skippable: true,
+    duration: 3.4,
+    lockUntil: 3.0,
+    // anchored: the boss is still flying in during the reveal
+    anchor: () => ({ x: boss.x, y: boss.y, z: boss.z }),
+    frames: [
+      { t: 0.0, pos: [22, 3, 24], target: [0, 0, 0], fov: 42, letterbox: 0 },
+      { t: 0.4, pos: [19, 2, 22], target: [0, 0, 0], fov: 40, letterbox: 1 },
+      { t: 1.9, pos: [-18, 8, 21], target: [0, 1, 0], fov: 44, letterbox: 1 },
+      { t: 2.5, pos: [-4, 16, 26], target: [0, 0, 0], fov: 50, letterbox: 1 },
+      { t: 2.9, abs: 1, pos: [px + 6, 24, pz + 26], target: [(px + boss.x) / 2, 3, (pz + boss.z) / 2], fov: 54, letterbox: 0.6 },
+      { t: 3.4, abs: 1, pos: [px, 27, pz + 21], target: [px, 1, pz], fov: 56, letterbox: 0 },
+    ],
+    cues: [
+      { t: 0.15, run: (g) => { g.screen.addTrauma(0.5); } },
+      {
+        t: 0.5,
+        run: (g) => {
+          g.ui.banner(boss.def.name, boss.def.title, 'danger');
+          g.rings.spawn(boss.x, boss.z, { color: 0xff3ea5, from: 2, to: 34, duration: 1.2, thickness: 0.08 });
+        },
+      },
+      { t: 1.5, run: (g) => { g.screen.addTrauma(0.45); g.fx.column(boss.x, boss.z, 0xff3ea5, 16, 40); } },
+    ],
+  };
+}
+
+/** Victory: rise away from the deck as the score settles. */
+function victorySequence(px, pz) {
+  return {
+    name: 'victory',
+    duration: 3.6,
+    lockUntil: 3.6,
+    frames: [
+      { abs: 1, t: 0.0, pos: [px, 26.5, pz + 19.5], target: [px, 1, pz], fov: 56, letterbox: 0.5, timeScale: 0.35 },
+      { abs: 1, t: 1.4, pos: [px + 4, 34, pz + 22], target: [px, 2, pz], fov: 52, letterbox: 1, timeScale: 0.6 },
+      { abs: 1, t: 3.6, pos: [px + 10, 62, pz + 38], target: [0, 3, 0], fov: 48, letterbox: 1, timeScale: 1 },
+    ],
+    cues: [
+      { t: 0.1, run: (g) => { g.screen.addFlash(0xffffff, 0.55); g.ui.banner('STABILIZER HELD', '', ''); } },
+      { t: 0.6, run: (g) => { g.fx.column(0, 0, 0x7dff9e, 22, 60); g.rings.spawn(0, 0, { color: 0x7dff9e, from: 2, to: 46, duration: 1.6, thickness: 0.06 }); } },
+    ],
+  };
+}
+
+/** Defeat: slow push-in on the wreck. */
+function defeatSequence(px, pz) {
+  return {
+    name: 'defeat',
+    duration: 2.9,
+    lockUntil: 2.9,
+    frames: [
+      { abs: 1, t: 0.0, pos: [px, 26.5, pz + 19.5], target: [px, 1, pz], fov: 56, letterbox: 0.4, timeScale: 0.18 },
+      { abs: 1, t: 1.2, pos: [px + 3, 12, pz + 12], target: [px, 1.2, pz], fov: 46, letterbox: 1, timeScale: 0.3 },
+      { abs: 1, t: 2.9, pos: [px + 5, 7, pz + 9], target: [px, 1.0, pz], fov: 40, letterbox: 1, timeScale: 0.55 },
+    ],
+    cues: [
+      { t: 0.05, run: (g) => { g.screen.desaturate = 0.9; } },
+    ],
+  };
+}
+
+/** Menu attract loop: a slow orbit with a periodic fly-by. */
+function menuOrbit(t, radius = 62, height = 30) {
+  const a = t * 0.055;
+  _dirVec.set(Math.cos(a) * radius, height + Math.sin(a * 0.7) * 6, Math.sin(a) * radius);
+  return _dirVec;
+}
 
 
 // ===== src/systems/waves.js ========================================
@@ -8174,7 +9736,10 @@ class WaveDirector {
     const g = this.game;
     const kind = this.bossKindFor(this.wave);
     const cycle = Math.max(0, Math.floor((this.wave - 1) / 15));
-    g.boss.spawn(kind, 1 + cycle * 0.7 + (this.wave > 15 ? (this.wave - 15) * 0.035 : 0));
+    const boss = g.boss.spawn(kind, 1 + cycle * 0.7 + (this.wave > 15 ? (this.wave - 15) * 0.035 : 0));
+    if (boss && g.director) {
+      g.director.play(bossIntroSequence(boss, g.player.position.x, g.player.position.z));
+    }
   }
 
   _clear() {
@@ -8910,6 +10475,13 @@ class UI {
   setBossPhase(text) { this.el['boss-phase'].textContent = text; }
   hideBoss() { this.el['boss-bar'].hidden = true; this.bossVisible = false; }
 
+  /** Cinematic bars; 0 = off, 1 = full. */
+  setLetterbox(v) {
+    if (this._lb === v) return;
+    this._lb = v;
+    document.documentElement.style.setProperty('--lb', String(v));
+  }
+
   setPerf(text, visible) {
     const el = this.el.perf;
     el.hidden = !visible;
@@ -9044,6 +10616,7 @@ class Game {
 
     await step(0.92, 'tuning the arrays', () => {
       this.waves = new WaveDirector(this, this.scene);
+      this.director = new Director(this);
       this.applySettings();
       this._bindWindow();
       this.ui.setLoadout(save.record.lastShip, save.record.lastDifficulty, save.record.lastMode);
@@ -9157,6 +10730,7 @@ class Game {
   }
 
   _teardownRun() {
+    if (this.director) this.director.cancel();
     if (!this.enemies) return;
     this.enemies.clear();
     this.projectiles.clear();
@@ -9213,7 +10787,12 @@ class Game {
     this.audio.setMusicMode('combat');
     this.input.lock(0.3);
 
-    this.after(1.0, () => this.waves.start(1));
+    this.director.cancel();
+    this.director.play(runStartSequence(this.player.position.x, this.player.position.z), () => {
+      // Guard: a wave may already have been forced to start (debug tooling, or
+      // a skip that raced the callback). Never rewind it to wave 1.
+      if (this.state === 'playing' && this.waves.wave === 0) this.waves.start(1);
+    });
     this._startTutorial();
   }
 
@@ -9271,6 +10850,7 @@ class Game {
     if (this.state !== 'playing') return;
     this.state = 'paused';
     this.paused = true;
+    this.director.cancel();
     this.ui.showPauseStats();
     this.ui.show('pause');
     this.audio.duck(0.5, 0.3);
@@ -9292,7 +10872,7 @@ class Game {
     this.audio.setIntensity(0);
     this.audio.play('defeat');
     this.screen.desaturate = 0.85;
-    this.after(2.4, () => this.endRun(false));
+    this.director.play(defeatSequence(this.player.position.x, this.player.position.z), () => this.endRun(false));
   }
 
   onBossDefeated(boss) {
@@ -9319,7 +10899,10 @@ class Game {
     this.player.heal(this.player.stats.maxHull * 0.06);
 
     if (isFinal) {
-      this.after(2.0, () => this.endRun(true));
+      this.after(0.8, () => {
+        if (this.state !== 'playing') return;
+        this.director.play(victorySequence(this.player.position.x, this.player.position.z), () => this.endRun(true));
+      });
       return;
     }
     this.after(1.7, () => this.openRefit(wave));
@@ -9602,6 +11185,9 @@ class Game {
   // ==================================================================
   _loop(now) {
     requestAnimationFrame(this._loop);
+    // Debug/tooling hook: hands the canvas to an external renderer (the model
+    // viewer) without the game loop overwriting the frame.
+    if (this.debugFreeze) { this._last = now; return; }
     const t0 = performance.now();
     let dtReal = (now - this._last) / 1000;
     this._last = now;
@@ -9631,7 +11217,17 @@ class Game {
     if (dtReal > MAX_DT) dtReal = MAX_DT;
     this.frame++;
     this.screen.update(dtReal);
+    if (this.director) {
+      this.director.update(dtReal);
+      this.input.enabled = !this.director.lockInput;
+    }
     this.input.sample(dtReal);
+    if (this.director && this.director.running) {
+      // any deliberate input skips an intro — unskippable cutscenes age badly
+      const wants = this.input.anyEdge || this.input.fireHeld
+        || this.input.move.x !== 0 || this.input.move.z !== 0;
+      if (wants) this.director.trySkip();
+    }
     this._handleGlobalKeys();
 
     const dt = dtReal * this.screen.timeScale;
@@ -9742,6 +11338,10 @@ class Game {
       const c = this.camera.camera;
       c.position.set(this.debugCamera.x, this.debugCamera.y, this.debugCamera.z);
       c.lookAt(this.debugCamera.tx, this.debugCamera.ty, this.debugCamera.tz);
+    } else if (this.director.running) {
+      // park the rig first, then apply — parking must not move the camera
+      this.camera.parkTarget(p.position.x, p.position.z);
+      this.director.applyTo(this.camera.camera);
     } else {
       this.camera.follow(p, this._aimWorld, dtReal, this.screen, this.boss.active ? 0.7 : 0,
         this.boss.active ? this.boss : null);
@@ -9873,6 +11473,8 @@ class Game {
       render: () => g.render(),
       setWave: (n) => {
         g.waves.clear(); g.enemies.clear(); g.projectiles.clear(); g.boss.despawn(true);
+        g.director.cancel();
+        g.input.enabled = true;
         g.timers.length = 0;
         g.state = 'playing';
         g.ui.hideAll();
@@ -9889,6 +11491,8 @@ class Game {
       input: g.input,
       setInput: (o) => { g.input.override = o; },
       setCamera: (c) => { g.debugCamera = c; },
+      freeze: (on = true) => { g.debugFreeze = !!on; },
+      skipCinematic: () => { g.director.cancel(); g.input.enabled = true; },
       clearInput: () => { g.input.override = null; },
       errors: [],
     };

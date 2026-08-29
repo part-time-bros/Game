@@ -8,7 +8,9 @@
  */
 import { clamp, clamp01, damp, lengthXZ, lerp, TAU, wrapAngle } from '../core/util.js';
 import { createNovaMaterial, createEnergyMaterial } from '../render/materials.js';
-import { buildWarden, buildHarrower, buildMaw, PALETTE } from '../render/models.js';
+import { PALETTE } from '../render/models.js';
+import { RIGGED_BOSSES } from '../render/rig-models.js';
+import { Pose, Animator } from '../render/rig.js';
 
 export const BOSS_DEFS = {
   warden: {
@@ -37,10 +39,12 @@ export class BossManager {
     this.root = new THREE.Group();
     this.root.visible = false;
     scene.add(this.root);
-    this.mat = createNovaMaterial({ rim: 0.9, spec: 0.5, rimColor: 0xff6ec7, dissolveColor: 0xff3ea5 });
     this.coreMat = createEnergyMaterial({ color: 0xff3ea5, opacity: 0.5, power: 1.8, pulse: 0.3 });
-    this.parts = {};
     this._built = {};
+    this.mat = null;
+    this.anim = null;
+    this.pose = null;
+    this.mesh = null;
     this.proxy = null;
     this.hazards = [];
     this.beams = [];
@@ -50,52 +54,16 @@ export class BossManager {
 
   _ensureBuilt(kind) {
     if (this._built[kind]) return this._built[kind];
-    let group = new THREE.Group();
-    const parts = {};
-    if (kind === 'warden') {
-      const m = buildWarden();
-      parts.core = new THREE.Mesh(m.core, this.mat);
-      parts.ring = new THREE.Mesh(m.ring, this.mat);
-      parts.plates = [];
-      for (let i = 0; i < 4; i++) {
-        const p = new THREE.Mesh(m.plate, this.mat);
-        parts.plates.push(p);
-        group.add(p);
-      }
-      parts.turrets = [];
-      for (let i = 0; i < 2; i++) {
-        const t = new THREE.Mesh(m.turret, this.mat);
-        parts.turrets.push(t);
-        group.add(t);
-      }
-      group.add(parts.core, parts.ring);
-      parts.geos = [m.core, m.ring, m.plate, m.turret];
-    } else if (kind === 'harrower') {
-      const m = buildHarrower();
-      parts.core = new THREE.Mesh(m.core, this.mat);
-      parts.arms = [];
-      for (let i = 0; i < 2; i++) {
-        const a = new THREE.Mesh(m.arm, this.mat);
-        parts.arms.push(a);
-        group.add(a);
-      }
-      group.add(parts.core);
-      parts.geos = [m.core, m.arm];
-    } else {
-      const m = buildMaw();
-      parts.core = new THREE.Mesh(m.core, this.mat);
-      parts.jaws = [];
-      for (let i = 0; i < 2; i++) {
-        const j = new THREE.Mesh(m.jaw, this.mat);
-        parts.jaws.push(j);
-        group.add(j);
-      }
-      parts.eye = new THREE.Mesh(m.eye, this.mat);
-      group.add(parts.core, parts.eye);
-      parts.geos = [m.core, m.jaw, m.eye];
-    }
-    this._built[kind] = { group, parts };
-    return this._built[kind];
+    const spec = RIGGED_BOSSES[kind]();
+    const pose = new Pose(spec.skeleton);
+    const mat = createNovaMaterial({
+      pose, rim: 0.9, spec: 0.5, rimColor: 0xff6ec7, dissolveColor: 0xff3ea5,
+    });
+    const mesh = new THREE.Mesh(spec.geometry, mat);
+    mesh.frustumCulled = false;
+    const built = { spec, pose, mat, mesh, anim: new Animator(pose, spec.clips) };
+    this._built[kind] = built;
+    return built;
   }
 
   spawn(kind, hpScale = 1) {
@@ -105,9 +73,13 @@ export class BossManager {
     this.despawn(true);
 
     const built = this._ensureBuilt(kind);
-    this.group = built.group;
-    this.parts = built.parts;
-    this.root.add(this.group);
+    this.mesh = built.mesh;
+    this.mat = built.mat;
+    this.pose = built.pose;
+    this.anim = built.anim;
+    this.anim.reset();
+    this.animState = '';
+    this.root.add(this.mesh);
     this.root.visible = true;
     this.kind = kind;
     this.def = def;
@@ -131,6 +103,7 @@ export class BossManager {
     this.invuln = 2.2;
     this.spin = 0;
     this.jaw = 0;
+    this.mouthOpen = false;
     this.armAngle = 0;
     this.hazards.length = 0;
 
@@ -161,7 +134,7 @@ export class BossManager {
   }
 
   despawn(quiet = false) {
-    if (this.group) { this.root.remove(this.group); this.group = null; }
+    if (this.mesh) { this.root.remove(this.mesh); this.mesh = null; }
     this.root.visible = false;
     this.active = false;
     this.state = 'gone';        // lets the wave director know the fight is over
@@ -231,7 +204,7 @@ export class BossManager {
 
   // ------------------------------------------------------------------
   update(dt) {
-    if (!this.group) return;
+    if (!this.mesh) return;
     const g = this.game;
     const p = g.player;
     this.time += dt;
@@ -241,8 +214,8 @@ export class BossManager {
     fu.value = damp(fu.value, 0, 0.00002, dt);
 
     if (this.state === 'entry') {
-      this.mat.uniforms.uDissolve.value = clamp01(1 - this.stateTime / 1.8);
-      this.z = lerp(-26, -12, clamp01(this.stateTime / 2.2));
+      this.mat.uniforms.uDissolve.value = clamp01(1 - this.stateTime / 0.9);
+      this.z = lerp(-26, -14, clamp01(this.stateTime / 2.2));
       if (this.stateTime > 2.2) { this.state = 'idle'; this.stateTime = 0; this.mat.uniforms.uDissolve.value = 0; }
     } else if (this.state === 'dying') {
       this.mat.uniforms.uDissolve.value = clamp01(this.stateTime / 2.4);
@@ -395,62 +368,58 @@ export class BossManager {
     }
   }
 
+  /** Ask the rig to play a clip, ignoring redundant re-triggers. */
+  playClip(name, opts = {}) {
+    if (!this.anim) return;
+    if (this.animState === name && !opts.restart) return;
+    this.animState = name;
+    this.anim.play(name, opts);
+  }
+
   _animate(dt, p) {
     const t = this.time;
     this.root.position.set(this.x, this.y + Math.sin(t * 0.9) * 0.35, this.z);
     this.root.rotation.y = this.yaw;
-    const P = this.parts;
+    const a = this.anim;
+    if (!a) return;
+
+    // continuous spins read better as overlays than as clip keys, which would
+    // need a key every few degrees to avoid easing artefacts
+    this.spin += dt * (0.5 + this.phase * 0.2);
     if (this.kind === 'warden') {
-      this.spin += dt * (0.5 + this.phase * 0.25);
-      P.ring.rotation.y = this.spin;
-      P.ring.rotation.x = Math.sin(t * 0.4) * 0.18;
-      P.core.rotation.y -= dt * 0.6;
-      P.core.rotation.x = Math.sin(t * 0.7) * 0.1;
-      P.plates.forEach((pl, i) => {
-        const a = this.spin * 1.4 + (i / P.plates.length) * TAU;
-        const r = 7.4 + Math.sin(t * 1.2 + i) * 0.5;
-        pl.position.set(Math.cos(a) * r, Math.sin(t * 1.1 + i * 2) * 1.2, Math.sin(a) * r);
-        pl.rotation.set(0, -a + Math.PI / 2, Math.sin(t + i) * 0.2);
-      });
-      P.turrets.forEach((tu, i) => {
-        const a = -this.spin * 0.8 + i * Math.PI;
-        tu.position.set(Math.cos(a) * 4.6, -1.6, Math.sin(a) * 4.6);
-        const dx = p.position.x - (this.x + tu.position.x), dz = p.position.z - (this.z + tu.position.z);
-        tu.rotation.y = Math.atan2(dx, dz) - this.yaw;
-      });
+      a.offsetRot('ring', 0, this.spin * 1.15, 0);
+      a.offsetRot('halo', this.spin * 0.4, this.spin * -0.7, 0);
+      a.offsetRot('core', 0, -this.spin * 0.8, 0);
+      // turrets track the pilot
+      if (p && p.alive) {
+        const aim = Math.atan2(p.position.x - this.x, p.position.z - this.z) - this.yaw;
+        a.offsetRot('turretL', 0, aim - Math.PI / 2, 0);
+        a.offsetRot('turretR', 0, aim + Math.PI / 2, 0);
+      }
     } else if (this.kind === 'harrower') {
-      this.armAngle += dt * (this.state === 'attack' ? 0.2 : 0.7);
-      P.arms.forEach((arm, i) => {
-        const side = i === 0 ? -1 : 1;
-        const swing = this._atkData && this._atkData.armAngle !== undefined ? this._atkData.armAngle * side : Math.sin(this.armAngle + i) * 0.35;
-        arm.position.set(side * 3.4, 0.4, -0.5);
-        arm.rotation.set(0, swing, 0);
-      });
-      P.core.rotation.z = damp(P.core.rotation.z, this.state === 'attack' && this.currentAttack && this.currentAttack.id === 'chargeRun' ? -0.25 : 0, 0.01, dt);
+      a.offsetRot('core', 0, 0, Math.sin(t * 0.8) * 0.05);
     } else {
-      this.spin += dt * 0.25;
-      P.core.rotation.y = this.spin;
-      P.core.rotation.x = Math.sin(t * 0.5) * 0.12;
-      const openTarget = this.jaw;
-      P.jaws.forEach((j, i) => {
-        const side = i === 0 ? 1 : -1;
-        j.position.set(0, side * (2.6 + openTarget * 2.6), -3.4);
-        j.rotation.set(side * (0.25 + openTarget * 0.55), 0, side > 0 ? 0 : Math.PI);
-      });
-      P.eye.position.set(0, 0, -4.2);
-      P.eye.scale.setScalar(0.8 + this.jaw * 0.7);
-      P.eye.visible = this.jaw > 0.05;
-      this.damageMult = this.jaw > 0.5 ? 1.9 : 1;
+      a.offsetRot('ring', this.spin * 0.25, this.spin * 0.6, 0);
+      a.offsetRot('core', 0, this.spin * 0.35, 0);
+      // the eye is only exposed while the jaws are wide: that is the weak point
+      const open = this.animState === 'open' || this.animState === 'devour';
+      this.mouthOpen = open && a.time > 0.55;
+      this.damageMult = this.mouthOpen ? 1.9 : 1;
     }
+
+    if (this.state === 'idle' || this.state === 'phase' || this.state === 'entry') {
+      this.playClip('idle', { fade: 0.3 });
+    }
+    a.update(dt);
   }
 
   dispose() {
     this.despawn(true);
     for (const k in this._built) {
       const b = this._built[k];
-      b.parts.geos.forEach((g) => g.dispose());
+      b.spec.geometry.dispose();
+      b.mat.dispose();
     }
-    this.mat.dispose();
     this.coreMat.dispose();
     if (this.root.parent) this.root.parent.remove(this.root);
   }
@@ -463,7 +432,7 @@ const ATTACKS = {
   warden: [
     {
       id: 'radial', phase: 1, weight: 30, cooldown: 1.9, maxTime: 3.4,
-      start: (b) => { b._atkData.fired = 0; b._atkData.offset = Math.random() * TAU; },
+      start: (b) => { b._atkData.fired = 0; b._atkData.offset = Math.random() * TAU; b.playClip('barrage', { fade: 0.12, restart: true }); },
       run: (b, g, p, dt) => {
         const volleys = b.phase >= 3 ? 5 : 3;
         const gap = 0.42;
@@ -478,7 +447,7 @@ const ATTACKS = {
     },
     {
       id: 'spiral', phase: 1, weight: 24, cooldown: 2.2, maxTime: 4.6,
-      start: (b) => { b._atkData.a = 0; b._atkData.next = 0; },
+      start: (b) => { b._atkData.a = 0; b._atkData.next = 0; b.playClip('barrage', { fade: 0.2, restart: true }); },
       run: (b, g, p, dt) => {
         const d = b._atkData;
         d.a += dt * (b.phase >= 3 ? 3.4 : 2.4);
@@ -501,6 +470,7 @@ const ATTACKS = {
       id: 'slam', phase: 1, weight: 20, cooldown: 2.0, maxTime: 4.0,
       start: (b, g) => {
         b._atkData.telegraph = g.decals.acquire(b.x, b.z, 15, 0xff3ea5, { fill: 0.7, thickness: 0.12, opacity: 0.9 });
+        b.playClip('slam', { fade: 0.08, restart: true });
         g.audio.play('charge', { dur: 1.1 });
       },
       run: (b, g, p, dt) => {
@@ -532,6 +502,7 @@ const ATTACKS = {
           const r = 16 + Math.random() * 10;
           g.spawnEnemyAt(b.phase >= 2 && i % 2 === 0 ? 'drone' : 'skitter', Math.cos(a) * r, Math.sin(a) * r);
         }
+        b.playClip('summon', { fade: 0.1, restart: true });
         g.audio.play('rift');
       },
       run: (b) => b.attackTime > 0.8,
@@ -573,6 +544,7 @@ const ATTACKS = {
         b._atkData.dir = Math.random() < 0.5 ? 1 : -1;
         b._atkData.angle = -1.1 * b._atkData.dir;
         for (let i = 0; i < 2; i++) b.beams.push(g.beams.acquire(0xff3ea5));
+        b.playClip('sweep', { fade: 0.12, restart: true });
         g.audio.play('charge', { dur: 1.0 });
       },
       run: (b, g, p, dt) => {
@@ -605,6 +577,7 @@ const ATTACKS = {
         const d = lengthXZ(dx, dz) || 1;
         b._atkData.dx = dx / d; b._atkData.dz = dz / d;
         b._atkData.telegraph = g.decals.acquire(b.x + dx / d * 22, b.z + dz / d * 22, 4.5, 0xffb347, { fill: 0.5, thickness: 0.16, opacity: 0.85 });
+        b.playClip('charge', { fade: 0.14, restart: true });
         g.audio.play('charge', { dur: 0.9 });
       },
       run: (b, g, p, dt) => {
@@ -647,7 +620,7 @@ const ATTACKS = {
     },
     {
       id: 'volley', phase: 1, weight: 22, cooldown: 1.7, maxTime: 3.2,
-      start: (b) => { b._atkData.n = 0; },
+      start: (b) => { b._atkData.n = 0; b.playClip('volley', { fade: 0.08, restart: true }); },
       run: (b, g, p, dt) => {
         const d = b._atkData;
         const shots = b.phase >= 3 ? 5 : 3;
@@ -687,14 +660,13 @@ const ATTACKS = {
   maw: [
     {
       id: 'slamWave', phase: 1, weight: 28, cooldown: 1.8, maxTime: 4.4,
-      start: (b, g) => { b._atkData.rings = 0; g.audio.play('charge', { dur: 1.0 }); },
+      start: (b, g) => { b._atkData.rings = 0; b.playClip('open', { fade: 0.1, restart: true }); g.audio.play('charge', { dur: 1.0 }); },
       run: (b, g, p, dt) => {
         const d = b._atkData;
-        b.jaw = clamp01(b.attackTime / 0.95);
         if (b.attackTime < 0.95) return false;
         if (!d.slammed) {
           d.slammed = true;
-          b.jaw = 0;
+          b.playClip('slam', { fade: 0.04, restart: true });
           g.screen.addTrauma(0.85);
           g.screen.stop(0.07);
           g.audio.play('explosion', { size: 1.6 });
@@ -711,7 +683,7 @@ const ATTACKS = {
         }
         return t > waves * 0.38 + 0.4;
       },
-      end: (b) => { b.jaw = 0; },
+      end: (b) => { b.playClip('idle', { fade: 0.25 }); },
     },
     {
       id: 'spikeVolley', phase: 1, weight: 26, cooldown: 1.6, maxTime: 4.0,
@@ -743,10 +715,9 @@ const ATTACKS = {
     },
     {
       id: 'devour', phase: 2, weight: 24, cooldown: 2.4, maxTime: 5.0,
-      start: (b, g) => { g.audio.play('charge', { dur: 1.4 }); b.jaw = 0; },
+      start: (b, g) => { g.audio.play('charge', { dur: 1.4 }); b.playClip('open', { fade: 0.12, restart: true }); },
       run: (b, g, p, dt) => {
-        const k = clamp01(b.attackTime / 1.2);
-        b.jaw = k;
+        if (b.attackTime > 1.15) b.playClip('devour', { fade: 0.18 });
         if (b.attackTime > 1.2 && p.alive) {
           // vacuum: pulls the player in while the eye is exposed
           const dx = b.x - p.position.x, dz = b.z - p.position.z;
@@ -761,10 +732,10 @@ const ATTACKS = {
           });
           if (Math.random() < dt * 6) b.fireAimed(g, p, 3, 0.5, 24, 8, { color: 0xa06bff });
         }
-        if (b.attackTime > 3.4) { b.jaw = damp(b.jaw, 0, 0.001, dt); }
+        if (b.attackTime > 3.4) b.playClip('idle', { fade: 0.3 });
         return b.attackTime > 4.0;
       },
-      end: (b) => { b.jaw = 0; },
+      end: (b) => { b.playClip('idle', { fade: 0.25 }); },
     },
     {
       id: 'spawnBrood', phase: 1, weight: 16, cooldown: 2.6, maxTime: 2.4,
@@ -784,7 +755,7 @@ const ATTACKS = {
       start: (b, g) => {
         b._atkData.a = b.yaw - 1.4;
         b.beams.push(g.beams.acquire(0xffe36e));
-        b.jaw = 1;
+        b.playClip('open', { fade: 0.1, restart: true });
         g.audio.play('charge', { dur: 1.2 });
       },
       run: (b, g, p, dt) => {
@@ -801,7 +772,7 @@ const ATTACKS = {
         }
         return b.attackTime > 4.6;
       },
-      end: (b, g) => { for (const bm of b.beams) g.beams.release(bm); b.beams.length = 0; b.jaw = 0; },
+      end: (b, g) => { for (const bm of b.beams) g.beams.release(bm); b.beams.length = 0; b.playClip('idle', { fade: 0.3 }); },
     },
   ],
 };

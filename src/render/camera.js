@@ -80,7 +80,7 @@ export class GameCamera {
     if (focus) {
       const fx2 = focus.x - p.x, fz2 = focus.z - p.z;
       focusSep = Math.sqrt(fx2 * fx2 + fz2 * fz2);
-      const w = clamp01(focusSep / 40) * 0.50;
+      const w = clamp01(focusSep / 36) * 0.46;
       this.target.x += fx2 * w;
       this.target.z += fz2 * w;
     }
@@ -91,7 +91,7 @@ export class GameCamera {
 
     // pull back when fast or when something huge is on the field
     const speed = Math.sqrt(player.velocity.x * player.velocity.x + player.velocity.z * player.velocity.z);
-    this.targetDistanceScale = 1 + clamp01(speed / 42) * 0.10 + threat * 0.12 + clamp01(focusSep / 40) * 0.55;
+    this.targetDistanceScale = 1 + clamp01(speed / 42) * 0.10 + threat * 0.12 + clamp01(focusSep / 34) * 0.85;
     this.distanceScale = damp(this.distanceScale, this.targetDistanceScale, 0.06, dt);
 
     const ds = this.distanceScale;
@@ -110,6 +110,18 @@ export class GameCamera {
       this.camera.fov = this.camera.aspect < 1 ? clamp(fov / this.camera.aspect * 0.62, 56, 82) : fov;
       this.camera.updateProjectionMatrix();
     }
+  }
+
+  /**
+   * Keep the chase rig's smoothing state on the player without moving the
+   * camera — used while a cinematic owns the pose, so handing control back
+   * does not swoop from wherever the cinematic ended.
+   */
+  parkTarget(x, z) {
+    this.target.set(x, 0, z);
+    this.smoothTarget.set(x, 0, z);
+    this.distanceScale = 1;
+    this.targetDistanceScale = 1;
   }
 
   /** Snap instantly (run start / restart) so there is no swoop-in. */

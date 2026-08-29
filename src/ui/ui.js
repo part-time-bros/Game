@@ -714,6 +714,13 @@ export class UI {
   setBossPhase(text) { this.el['boss-phase'].textContent = text; }
   hideBoss() { this.el['boss-bar'].hidden = true; this.bossVisible = false; }
 
+  /** Cinematic bars; 0 = off, 1 = full. */
+  setLetterbox(v) {
+    if (this._lb === v) return;
+    this._lb = v;
+    document.documentElement.style.setProperty('--lb', String(v));
+  }
+
   setPerf(text, visible) {
     const el = this.el.perf;
     el.hidden = !visible;

@@ -362,6 +362,7 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
     const N = window.__NOVA;
     N.start('striker', 'recruit', 'campaign', 11);
     N.step(1 / 60, 60);
+    N.skipCinematic();
     N.game.waves.start(15);
     for (let i = 0; i < 600 && !N.game.boss.active; i++) N.step(1 / 60);
     const spawned = N.game.boss.active;
@@ -601,7 +602,12 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
     }));
     check('touch overlay appears on a touch device', shown.touchUi && shown.bodyTouch && shown.hasTouch, JSON.stringify(shown));
 
-    await tp.evaluate(() => { window.__NOVA.start('striker', 'pilot', 'campaign', 3); window.__NOVA.step(1 / 60, 90); });
+    await tp.evaluate(() => {
+      window.__NOVA.start('striker', 'pilot', 'campaign', 3);
+      window.__NOVA.step(1 / 60, 90);
+      window.__NOVA.skipCinematic();
+      window.__NOVA.step(1 / 60, 10);
+    });
 
     // drag the movement stick and confirm the ship actually accelerates
     const stick = await tp.locator('#stick-move').boundingBox();

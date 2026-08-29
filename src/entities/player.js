@@ -103,6 +103,8 @@ export class Player {
     this.animator.reset();
     this.animState = '';
     this.recoil = 0;
+    this.warpIn = 0;
+    this.hullMat.uniforms.uDissolve.value = 0;
     this.hullMat.uniforms.uRimColor.value.set(entry.glow);
     this.shieldMat.uniforms.uColor.value.set(entry.glow);
     this.ringMat.uniforms.uColor.value.set(entry.glow);
@@ -175,6 +177,12 @@ export class Player {
     if (this.stats.maxHull > prevMaxHull) this.hull += this.stats.maxHull - prevMaxHull;
     if (mod.onTake) mod.onTake(this);
     return true;
+  }
+
+  /** Materialise the hull over ~1.2s; used by the deployment cinematic. */
+  beginWarpIn() {
+    this.warpIn = 1.25;
+    this.hullMat.uniforms.uDissolve.value = 1;
   }
 
   get speed() { return lengthXZ(this.velocity.x, this.velocity.z); }
@@ -675,6 +683,18 @@ export class Player {
     this.shieldMesh.visible = sm.value > 0.005;
     this.shieldMat.uniforms.uColor.value.lerp(
       this._tmpColor || (this._tmpColor = new THREE.Color()).set(this.glowColor), 0);
+
+    if (this.warpIn > 0) {
+      this.warpIn = Math.max(0, this.warpIn - dt);
+      this.hullMat.uniforms.uDissolve.value = clamp01(this.warpIn / 1.25);
+      if (Math.random() < 0.5) {
+        g.fx.glow.spawn({
+          x: this.position.x + (Math.random() - 0.5) * 4, y: 0.4 + Math.random() * 2.4,
+          z: this.position.z + (Math.random() - 0.5) * 4, vy: 3 + Math.random() * 4,
+          color: 0xffffff, color2: this.glowColor, size: 0.6, size2: 0, life: 0.45, alpha: 0.9, drag: 1.6,
+        });
+      }
+    }
 
     // hit flash + invulnerability shimmer
     const flashU = this.hullMat.uniforms.uFlash;
