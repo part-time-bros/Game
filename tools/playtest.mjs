@@ -121,7 +121,7 @@ async function main() {
     await shot(page, '01-menu', true);
 
     if (!SHOTS_ONLY) {
-      await runSuite(page, consoleErrors, consoleWarnings);
+      await runSuite(page, consoleErrors, consoleWarnings, url);
     } else {
       await captureShowcase(page);
     }
@@ -209,7 +209,7 @@ async function step(page, seconds, opts = {}) {
   }, { seconds, opts });
 }
 
-async function runSuite(page, consoleErrors, consoleWarnings) {
+async function runSuite(page, consoleErrors, consoleWarnings, url) {
   const errAt = () => consoleErrors.length;
 
   // ---------------- menus ----------------
@@ -510,6 +510,114 @@ async function runSuite(page, consoleErrors, consoleWarnings) {
     await page.evaluate(() => { window.__NOVA.step(1 / 60, 6); window.__NOVA.render(); });
   }
   check('survives viewport changes', consoleErrors.length === errAt() || true, `${consoleErrors.length} total errors`);
+  await page.setViewportSize({ width: 1280, height: 720 });
+
+  // ---------------- resilience ----------------
+  section('RESILIENCE');
+
+  // corrupt save payload must not brick the boot
+  await page.evaluate(() => {
+    try { localStorage.setItem('nova-lance/v1', '{not json at all'); } catch (e) { /* ignore */ }
+  });
+  {
+    const p2 = await page.context().newPage();
+    const errs2 = [];
+    p2.on('pageerror', (e) => errs2.push(e.message));
+    await p2.goto(url, { waitUntil: 'domcontentloaded' });
+    await p2.waitForFunction(() => !!window.__NOVA, null, { timeout: 45000 }).catch(() => {});
+    const ok = await p2.evaluate(() => !!window.__NOVA && window.__NOVA.state() === 'menu').catch(() => false);
+    check('boots with a corrupt save payload', ok, errs2.slice(0, 2).join(' | '));
+    await p2.close();
+  }
+  await page.evaluate(() => { try { localStorage.clear(); } catch (e) { /* ignore */ } });
+
+  // storage entirely unavailable (private mode / blocked cookies)
+  {
+    const p3 = await page.context().newPage();
+    await p3.addInitScript(() => {
+      const boom = () => { throw new DOMException('denied', 'SecurityError'); };
+      Object.defineProperty(window, 'localStorage', {
+        configurable: true,
+        get() { return { getItem: boom, setItem: boom, removeItem: boom, clear: boom }; },
+      });
+    });
+    const errs3 = [];
+    p3.on('pageerror', (e) => errs3.push(e.message));
+    await p3.goto(url, { waitUntil: 'domcontentloaded' });
+    await p3.waitForFunction(() => !!window.__NOVA, null, { timeout: 45000 }).catch(() => {});
+    const res = await p3.evaluate(() => {
+      const N = window.__NOVA;
+      if (!N) return null;
+      N.start('striker', 'pilot', 'campaign', 1);
+      N.step(1 / 60, 120);
+      N.game.abortRun();
+      return { state: N.state(), available: N.game.save.available };
+    }).catch(() => null);
+    check('plays with storage unavailable', !!res && res.state === 'results' && res.available === false, JSON.stringify(res) + errs3.slice(0, 1).join(''));
+    await p3.close();
+  }
+
+  // WebGL context loss / restore
+  const ctxLoss = await page.evaluate(async () => {
+    const N = window.__NOVA;
+    N.start('striker', 'pilot', 'campaign', 2);
+    N.step(1 / 60, 60);
+    const gl = N.game.renderer.renderer.getContext();
+    const ext = gl.getExtension('WEBGL_lose_context');
+    if (!ext) return { skipped: true };
+    let threw = null;
+    ext.loseContext();
+    await new Promise((r) => setTimeout(r, 120));
+    try { N.step(1 / 60, 30); N.render(); } catch (e) { threw = e.message; }
+    const lostFlag = N.game.renderer.contextLost;
+    ext.restoreContext();
+    await new Promise((r) => setTimeout(r, 400));
+    try { N.step(1 / 60, 30); N.render(); } catch (e) { threw = threw || e.message; }
+    return { skipped: false, lostFlag, threw, restored: !N.game.renderer.contextLost, state: N.state() };
+  });
+  if (ctxLoss.skipped) check('context loss handled', true, 'extension unavailable — skipped');
+  else {
+    check('survives WebGL context loss', !ctxLoss.threw, ctxLoss.threw || '');
+    check('detects and clears the lost flag', ctxLoss.lostFlag === true && ctxLoss.restored === true, `lost=${ctxLoss.lostFlag} restored=${ctxLoss.restored}`);
+  }
+
+  // pool saturation + absurd time steps
+  const stress = await page.evaluate(() => {
+    const N = window.__NOVA, g = N.game;
+    const errs = [];
+    try {
+      N.start('striker', 'pilot', 'campaign', 9);
+      N.step(1 / 60, 60);
+      for (let i = 0; i < 400; i++) g.enemies.spawn('skitter', Math.random() * 60 - 30, Math.random() * 60 - 30, {});
+      for (let i = 0; i < 800; i++) g.projectiles.fireEnemy(Math.random() * 40 - 20, 1, Math.random() * 40 - 20, 1, 0, {});
+      for (let i = 0; i < 200; i++) g.rings.spawn(0, 0, { color: 0xffffff });
+      for (let i = 0; i < 200; i++) g.decals.acquire(0, 0, 4, 0xffffff, {});
+      for (let i = 0; i < 60; i++) g.beams.acquire(0xffffff);
+      N.step(1 / 60, 180);
+    } catch (e) { errs.push('saturate: ' + e.message); }
+    try {
+      for (const dt of [0, 1e-6, 0.5, 2, 10, -1, NaN]) g.tick(dt);
+    } catch (e) { errs.push('dt: ' + e.message); }
+    const st = N.stats();
+    return { errs, enemies: st.enemies, proj: st.projectiles, alive: st.alive, finite: Number.isFinite(g.player.position.x) && Number.isFinite(g.score) };
+  });
+  check('pool saturation is bounded and safe', stress.errs.length === 0, stress.errs.join(' | '));
+  check('respects pool caps', stress.enemies <= 200 && stress.proj <= 800, `enemies=${stress.enemies} projectiles=${stress.proj}`);
+  check('survives hostile delta times', stress.finite, 'position/score stayed finite');
+
+  // tiny viewport
+  await page.setViewportSize({ width: 320, height: 480 });
+  const tiny = await page.evaluate(() => {
+    const N = window.__NOVA;
+    N.start('striker', 'pilot', 'campaign', 6);
+    N.step(1 / 60, 120);
+    N.render();
+    const hud = document.getElementById('hud-bottom').getBoundingClientRect();
+    const bars = [...document.querySelectorAll('#hud-bottom .bar')].map((b) => Math.round(b.getBoundingClientRect().width));
+    return { ok: N.state() === 'playing', hudBottom: Math.round(hud.bottom), inner: window.innerHeight, bars };
+  });
+  check('playable at 320x480', tiny.ok && tiny.hudBottom <= tiny.inner, `hud bottom=${tiny.hudBottom}/${tiny.inner}`);
+  check('HUD bars keep width on a tiny screen', tiny.bars.every((w) => w >= 40), `bars=${tiny.bars.join(',')}`);
   await page.setViewportSize({ width: 1280, height: 720 });
 
   // ---------------- performance ----------------

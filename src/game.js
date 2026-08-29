@@ -56,6 +56,7 @@ export class Game {
     this.enemyDamageMult = 1;
     this.rerolls = 1;
 
+    this.tutorial = null;
     this.frameStat = new RollingStat(120);
     this.simStat = new RollingStat(120);
     this._perfText = '';
@@ -188,10 +189,11 @@ export class Game {
 
   applySettings() {
     const s = save.settings;
+    const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     this.audio.setVolumes(s.master, s.music, s.sfx);
     this.renderer.setQuality(s.quality);
     if (this.fx) this.fx.setBudget(this.renderer.settings.particleScale);
-    if (this.screen) this.screen.shakeScale = s.shake;
+    if (this.screen) this.screen.shakeScale = reduce ? Math.min(s.shake, 0.25) : s.shake;
     document.body.classList.toggle('no-scanlines', !s.scanlines);
     document.body.classList.toggle('no-flash', !s.flashes);
     if (this.camera) this.camera.enableLead = s.cameraRotate;
@@ -285,6 +287,49 @@ export class Game {
     this.input.lock(0.3);
 
     this.after(1.0, () => this.waves.start(1));
+    this._startTutorial();
+  }
+
+  /**
+   * First-run onboarding: a handful of contextual prompts, worded for whatever
+   * device the player is actually holding, shown once per career.
+   */
+  _startTutorial() {
+    if (save.record.seenIntro) { this.tutorial = null; return; }
+    const touch = this.input.hasTouch;
+    const pad = this.input.scheme === 'gamepad';
+    const move = touch ? 'LEFT STICK' : pad ? 'LEFT STICK' : 'W A S D';
+    const aim = touch ? 'RIGHT STICK' : pad ? 'RIGHT STICK' : 'MOUSE';
+    const fire = touch ? 'AIM TO FIRE' : pad ? 'RIGHT TRIGGER' : 'HOLD LEFT MOUSE';
+    const dash = touch ? 'DASH BUTTON' : pad ? 'RB' : 'SPACE';
+    const pulse = touch ? 'PULSE BUTTON' : pad ? 'LEFT TRIGGER' : 'RIGHT MOUSE';
+    this.tutorial = {
+      steps: [
+        { at: 1.5, text: `${move} — THRUST` },
+        { at: 5.0, text: `${aim} — AIM · ${fire}` },
+        { at: 11.0, text: `${dash} — PHASE DASH, INVULNERABLE` },
+        { at: 20.0, text: `${pulse} — NOVA PULSE CLEARS BULLETS` },
+        { at: 34.0, text: 'SHIELD RECHARGES WHEN YOU STOP TAKING HITS' },
+      ],
+      i: 0,
+      t: 0,
+    };
+  }
+
+  _updateTutorial(dt) {
+    const tut = this.tutorial;
+    if (!tut) return;
+    tut.t += dt;
+    const step = tut.steps[tut.i];
+    if (step && tut.t >= step.at) {
+      tut.i++;
+      this.ui.toast(step.text, 'warn');
+    }
+    if (tut.i >= tut.steps.length) {
+      this.tutorial = null;
+      save.record.seenIntro = true;
+      save.save();
+    }
   }
 
   restartRun() {
@@ -529,6 +574,13 @@ export class Game {
       this.waves.waveKills++;
       if (p.stats.lifesteal > 0) p.heal(p.stats.lifesteal);
       p.gainOverdrive(4);
+      // A frame of hitch on heavy kills only — on swarm chaff it would read as
+      // stutter rather than impact.
+      if ((e.type.tier >= 2 || e.elite) && this.time - (this._lastKillStop || -9) > 0.22) {
+        this._lastKillStop = this.time;
+        this.screen.stop(e.elite ? 0.05 : 0.032);
+        this.screen.addTrauma(0.05);
+      }
     }
     if (opts.isBossKill) this.runStats.kills++;
   }
@@ -646,6 +698,10 @@ export class Game {
 
   /** One simulation + presentation step. Split out so tests can drive it. */
   tick(dtReal) {
+    // Guard here rather than only in the rAF loop: debug/test callers and a
+    // clock that jumps backwards must never be able to inject NaN into the sim.
+    if (!Number.isFinite(dtReal) || dtReal < 0) dtReal = 0;
+    if (dtReal > MAX_DT) dtReal = MAX_DT;
     this.frame++;
     this.screen.update(dtReal);
     this.input.sample(dtReal);
@@ -730,6 +786,7 @@ export class Game {
 
     this.shadows.begin();
     this._runTimers(dt);
+    this._updateTutorial(dt);
     p.update(dt, this.input, this._aimWorld);
     if (p.alive) this.shadows.push(p.position.x, p.position.y, p.position.z, 1.7, 1);
     this.enemies.update(dt);

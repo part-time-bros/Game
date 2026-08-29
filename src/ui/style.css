@@ -156,12 +156,14 @@ body.no-scanlines #scanlines{display:none;}
 .ship-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;}
 .ship-card{
   position:relative;padding:16px;border:1px solid var(--line-soft);background:rgba(10,16,32,.7);cursor:pointer;
+  font:inherit;color:inherit;text-align:left;display:block;width:100%;
   clip-path:polygon(0 0,calc(100% - 14px) 0,100% 14px,100% 100%,14px 100%,0 calc(100% - 14px));
   transition:border-color .16s,background .16s,transform .16s;
 }
-.ship-card:hover{border-color:var(--line);transform:translateY(-2px);}
+.ship-card:hover,.ship-card:focus-visible{border-color:var(--line);transform:translateY(-2px);outline:none;box-shadow:0 0 0 1px var(--line);}
 .ship-card[data-selected]{border-color:var(--mag);background:rgba(40,12,32,.6);box-shadow:0 0 30px rgba(255,62,165,.2) inset;}
 .ship-card[data-locked]{opacity:.44;cursor:not-allowed;}
+.ship-card[data-locked]:hover{transform:none;}
 .ship-card h4{font-family:var(--f-display);letter-spacing:.2em;font-size:16px;color:#fff;margin-bottom:2px;}
 .ship-card .role{font-size:11px;letter-spacing:.2em;color:var(--cyan);text-transform:uppercase;margin-bottom:10px;}
 .ship-card .blurb{font-size:13px;color:var(--ink-dim);line-height:1.45;margin-bottom:10px;min-height:2.9em;}
@@ -238,6 +240,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;background:var(--cyan
 }
 .card:nth-child(1){animation-delay:.02s}.card:nth-child(2){animation-delay:.09s}.card:nth-child(3){animation-delay:.16s}.card:nth-child(4){animation-delay:.23s}
 @keyframes card-in{from{opacity:0;transform:translateY(22px) rotateX(8deg)}to{opacity:1;transform:none}}
+.card{font:inherit;color:inherit;text-align:left;}
 .card:hover,.card:focus-visible{transform:translateY(-6px);border-color:var(--tint,var(--cyan));box-shadow:0 0 34px -6px var(--tint,var(--cyan));outline:none;}
 .card .glyph{width:44px;height:44px;color:var(--tint,var(--cyan));}
 .card .glyph svg{width:100%;height:100%;filter:drop-shadow(0 0 8px currentColor);}

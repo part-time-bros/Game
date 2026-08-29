@@ -59,7 +59,7 @@ export class Renderer {
     this._buildTargets(1, 1);
     this._buildPasses();
 
-    this._onLost = (e) => { e.preventDefault(); this.contextLost = true; };
+    this._onLost = (e) => { e.preventDefault(); this.contextLost = true; this._orphaned = true; };
     this._onRestored = () => { this.contextLost = false; this.resize(this._w, this._h, true); };
     canvas.addEventListener('webglcontextlost', this._onLost, false);
     canvas.addEventListener('webglcontextrestored', this._onRestored, false);
@@ -111,8 +111,13 @@ export class Renderer {
 
   _disposeTargets() {
     for (const k of ['sceneRT', 'brightRT', 'blurA', 'blurB', 'blurC', 'blurD']) {
-      if (this[k]) { this[k].dispose(); this[k] = null; }
+      if (!this[k]) continue;
+      // After a context loss the GPU objects are already gone; calling dispose()
+      // makes three try to delete handles that no longer belong to the context.
+      if (!this._orphaned) this[k].dispose();
+      this[k] = null;
     }
+    this._orphaned = false;
   }
 
   _buildPasses() {

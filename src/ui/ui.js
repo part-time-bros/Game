@@ -185,9 +185,11 @@ export class UI {
     host.innerHTML = '';
     for (const ship of shipList()) {
       const unlocked = save.isShipUnlocked(ship.id);
-      const card = document.createElement('div');
+      const card = document.createElement('button');
+      card.type = 'button';
       card.className = 'ship-card';
-      if (!unlocked) card.dataset.locked = '1';
+      card.setAttribute('aria-pressed', String(ship.id === this._selectedShip));
+      if (!unlocked) { card.dataset.locked = '1'; card.disabled = true; }
       if (ship.id === this._selectedShip && unlocked) card.dataset.selected = '1';
       const bar = (label, v) => `<div class="ship-stat"><span>${label}</span><i style="--v:${Math.round(v * 100)}%"></i></div>`;
       card.innerHTML = `

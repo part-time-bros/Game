@@ -174,12 +174,14 @@ body.no-scanlines #scanlines{display:none;}
 .ship-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;}
 .ship-card{
   position:relative;padding:16px;border:1px solid var(--line-soft);background:rgba(10,16,32,.7);cursor:pointer;
+  font:inherit;color:inherit;text-align:left;display:block;width:100%;
   clip-path:polygon(0 0,calc(100% - 14px) 0,100% 14px,100% 100%,14px 100%,0 calc(100% - 14px));
   transition:border-color .16s,background .16s,transform .16s;
 }
-.ship-card:hover{border-color:var(--line);transform:translateY(-2px);}
+.ship-card:hover,.ship-card:focus-visible{border-color:var(--line);transform:translateY(-2px);outline:none;box-shadow:0 0 0 1px var(--line);}
 .ship-card[data-selected]{border-color:var(--mag);background:rgba(40,12,32,.6);box-shadow:0 0 30px rgba(255,62,165,.2) inset;}
 .ship-card[data-locked]{opacity:.44;cursor:not-allowed;}
+.ship-card[data-locked]:hover{transform:none;}
 .ship-card h4{font-family:var(--f-display);letter-spacing:.2em;font-size:16px;color:#fff;margin-bottom:2px;}
 .ship-card .role{font-size:11px;letter-spacing:.2em;color:var(--cyan);text-transform:uppercase;margin-bottom:10px;}
 .ship-card .blurb{font-size:13px;color:var(--ink-dim);line-height:1.45;margin-bottom:10px;min-height:2.9em;}
@@ -256,6 +258,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;background:var(--cyan
 }
 .card:nth-child(1){animation-delay:.02s}.card:nth-child(2){animation-delay:.09s}.card:nth-child(3){animation-delay:.16s}.card:nth-child(4){animation-delay:.23s}
 @keyframes card-in{from{opacity:0;transform:translateY(22px) rotateX(8deg)}to{opacity:1;transform:none}}
+.card{font:inherit;color:inherit;text-align:left;}
 .card:hover,.card:focus-visible{transform:translateY(-6px);border-color:var(--tint,var(--cyan));box-shadow:0 0 34px -6px var(--tint,var(--cyan));outline:none;}
 .card .glyph{width:44px;height:44px;color:var(--tint,var(--cyan));}
 .card .glyph svg{width:100%;height:100%;filter:drop-shadow(0 0 8px currentColor);}
@@ -3296,7 +3299,7 @@ class Renderer {
     this._buildTargets(1, 1);
     this._buildPasses();
 
-    this._onLost = (e) => { e.preventDefault(); this.contextLost = true; };
+    this._onLost = (e) => { e.preventDefault(); this.contextLost = true; this._orphaned = true; };
     this._onRestored = () => { this.contextLost = false; this.resize(this._w, this._h, true); };
     canvas.addEventListener('webglcontextlost', this._onLost, false);
     canvas.addEventListener('webglcontextrestored', this._onRestored, false);
@@ -3348,8 +3351,13 @@ class Renderer {
 
   _disposeTargets() {
     for (const k of ['sceneRT', 'brightRT', 'blurA', 'blurB', 'blurC', 'blurD']) {
-      if (this[k]) { this[k].dispose(); this[k] = null; }
+      if (!this[k]) continue;
+      // After a context loss the GPU objects are already gone; calling dispose()
+      // makes three try to delete handles that no longer belong to the context.
+      if (!this._orphaned) this[k].dispose();
+      this[k] = null;
     }
+    this._orphaned = false;
   }
 
   _buildPasses() {
@@ -8317,9 +8325,11 @@ class UI {
     host.innerHTML = '';
     for (const ship of shipList()) {
       const unlocked = save.isShipUnlocked(ship.id);
-      const card = document.createElement('div');
+      const card = document.createElement('button');
+      card.type = 'button';
       card.className = 'ship-card';
-      if (!unlocked) card.dataset.locked = '1';
+      card.setAttribute('aria-pressed', String(ship.id === this._selectedShip));
+      if (!unlocked) { card.dataset.locked = '1'; card.disabled = true; }
       if (ship.id === this._selectedShip && unlocked) card.dataset.selected = '1';
       const bar = (label, v) => `<div class="ship-stat"><span>${label}</span><i style="--v:${Math.round(v * 100)}%"></i></div>`;
       card.innerHTML = `
@@ -8903,6 +8913,7 @@ class Game {
     this.enemyDamageMult = 1;
     this.rerolls = 1;
 
+    this.tutorial = null;
     this.frameStat = new RollingStat(120);
     this.simStat = new RollingStat(120);
     this._perfText = '';
@@ -9035,10 +9046,11 @@ class Game {
 
   applySettings() {
     const s = save.settings;
+    const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     this.audio.setVolumes(s.master, s.music, s.sfx);
     this.renderer.setQuality(s.quality);
     if (this.fx) this.fx.setBudget(this.renderer.settings.particleScale);
-    if (this.screen) this.screen.shakeScale = s.shake;
+    if (this.screen) this.screen.shakeScale = reduce ? Math.min(s.shake, 0.25) : s.shake;
     document.body.classList.toggle('no-scanlines', !s.scanlines);
     document.body.classList.toggle('no-flash', !s.flashes);
     if (this.camera) this.camera.enableLead = s.cameraRotate;
@@ -9132,6 +9144,49 @@ class Game {
     this.input.lock(0.3);
 
     this.after(1.0, () => this.waves.start(1));
+    this._startTutorial();
+  }
+
+  /**
+   * First-run onboarding: a handful of contextual prompts, worded for whatever
+   * device the player is actually holding, shown once per career.
+   */
+  _startTutorial() {
+    if (save.record.seenIntro) { this.tutorial = null; return; }
+    const touch = this.input.hasTouch;
+    const pad = this.input.scheme === 'gamepad';
+    const move = touch ? 'LEFT STICK' : pad ? 'LEFT STICK' : 'W A S D';
+    const aim = touch ? 'RIGHT STICK' : pad ? 'RIGHT STICK' : 'MOUSE';
+    const fire = touch ? 'AIM TO FIRE' : pad ? 'RIGHT TRIGGER' : 'HOLD LEFT MOUSE';
+    const dash = touch ? 'DASH BUTTON' : pad ? 'RB' : 'SPACE';
+    const pulse = touch ? 'PULSE BUTTON' : pad ? 'LEFT TRIGGER' : 'RIGHT MOUSE';
+    this.tutorial = {
+      steps: [
+        { at: 1.5, text: `${move} — THRUST` },
+        { at: 5.0, text: `${aim} — AIM · ${fire}` },
+        { at: 11.0, text: `${dash} — PHASE DASH, INVULNERABLE` },
+        { at: 20.0, text: `${pulse} — NOVA PULSE CLEARS BULLETS` },
+        { at: 34.0, text: 'SHIELD RECHARGES WHEN YOU STOP TAKING HITS' },
+      ],
+      i: 0,
+      t: 0,
+    };
+  }
+
+  _updateTutorial(dt) {
+    const tut = this.tutorial;
+    if (!tut) return;
+    tut.t += dt;
+    const step = tut.steps[tut.i];
+    if (step && tut.t >= step.at) {
+      tut.i++;
+      this.ui.toast(step.text, 'warn');
+    }
+    if (tut.i >= tut.steps.length) {
+      this.tutorial = null;
+      save.record.seenIntro = true;
+      save.save();
+    }
   }
 
   restartRun() {
@@ -9376,6 +9431,13 @@ class Game {
       this.waves.waveKills++;
       if (p.stats.lifesteal > 0) p.heal(p.stats.lifesteal);
       p.gainOverdrive(4);
+      // A frame of hitch on heavy kills only — on swarm chaff it would read as
+      // stutter rather than impact.
+      if ((e.type.tier >= 2 || e.elite) && this.time - (this._lastKillStop || -9) > 0.22) {
+        this._lastKillStop = this.time;
+        this.screen.stop(e.elite ? 0.05 : 0.032);
+        this.screen.addTrauma(0.05);
+      }
     }
     if (opts.isBossKill) this.runStats.kills++;
   }
@@ -9493,6 +9555,10 @@ class Game {
 
   /** One simulation + presentation step. Split out so tests can drive it. */
   tick(dtReal) {
+    // Guard here rather than only in the rAF loop: debug/test callers and a
+    // clock that jumps backwards must never be able to inject NaN into the sim.
+    if (!Number.isFinite(dtReal) || dtReal < 0) dtReal = 0;
+    if (dtReal > MAX_DT) dtReal = MAX_DT;
     this.frame++;
     this.screen.update(dtReal);
     this.input.sample(dtReal);
@@ -9577,6 +9643,7 @@ class Game {
 
     this.shadows.begin();
     this._runTimers(dt);
+    this._updateTutorial(dt);
     p.update(dt, this.input, this._aimWorld);
     if (p.alive) this.shadows.push(p.position.x, p.position.y, p.position.z, 1.7, 1);
     this.enemies.update(dt);

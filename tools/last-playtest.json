@@ -1,12 +1,12 @@
 {
-  "when": "2026-08-28T16:34:57.716Z",
-  "passed": 52,
+  "when": "2026-08-29T01:25:24.332Z",
+  "passed": 61,
   "failed": 0,
   "results": [
     {
       "name": "game boots",
       "ok": true,
-      "detail": "1835ms"
+      "detail": "2242ms"
     },
     {
       "name": "no console errors on boot",
@@ -56,7 +56,7 @@
     {
       "name": "score accrues",
       "ok": true,
-      "detail": "score=300"
+      "detail": "score=192"
     },
     {
       "name": "wave 8 mixed composition runs clean",
@@ -66,12 +66,12 @@
     {
       "name": "enemy count stays bounded",
       "ok": true,
-      "detail": "max=17"
+      "detail": "max=12"
     },
     {
       "name": "projectiles stay bounded",
       "ok": true,
-      "detail": "max=19"
+      "detail": "max=12"
     },
     {
       "name": "wave 5 spawns warden",
@@ -176,7 +176,7 @@
     {
       "name": "campaign reaches a conclusion",
       "ok": true,
-      "detail": "results after 607s"
+      "detail": "results after 438s"
     },
     {
       "name": "all 15 waves are reachable",
@@ -211,7 +211,7 @@
     {
       "name": "geometry count stable across 12 runs",
       "ok": true,
-      "detail": "37 → 37"
+      "detail": "42 → 42"
     },
     {
       "name": "texture count stable across 12 runs",
@@ -236,7 +236,7 @@
     {
       "name": "state sane after abuse",
       "ok": true,
-      "detail": "playing"
+      "detail": "dying"
     },
     {
       "name": "survives viewport changes",
@@ -244,14 +244,59 @@
       "detail": "0 total errors"
     },
     {
+      "name": "boots with a corrupt save payload",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "plays with storage unavailable",
+      "ok": true,
+      "detail": "{\"state\":\"results\",\"available\":false}"
+    },
+    {
+      "name": "survives WebGL context loss",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "detects and clears the lost flag",
+      "ok": true,
+      "detail": "lost=true restored=true"
+    },
+    {
+      "name": "pool saturation is bounded and safe",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "respects pool caps",
+      "ok": true,
+      "detail": "enemies=36 projectiles=24"
+    },
+    {
+      "name": "survives hostile delta times",
+      "ok": true,
+      "detail": "position/score stayed finite"
+    },
+    {
+      "name": "playable at 320x480",
+      "ok": true,
+      "detail": "hud bottom=466/480"
+    },
+    {
+      "name": "HUD bars keep width on a tiny screen",
+      "ok": true,
+      "detail": "bars=60,60,134,134"
+    },
+    {
       "name": "sim cost under 4ms/frame at wave 12",
       "ok": true,
-      "detail": "0.06ms"
+      "detail": "0.04ms"
     },
     {
       "name": "draw calls under 90",
       "ok": true,
-      "detail": "54"
+      "detail": "56"
     },
     {
       "name": "no console errors across the whole suite",
