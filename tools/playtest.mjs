@@ -619,9 +619,19 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
     await tp.mouse.down();
     await tp.mouse.move(stick.x + stick.width / 2 + 44, stick.y + stick.height / 2, { steps: 4 });
     await tp.evaluate(() => window.__NOVA.step(1 / 60, 60));
-    const after = await tp.evaluate(() => ({ x: window.__NOVA.game.player.position.x, z: window.__NOVA.game.player.position.z }));
+    const after = await tp.evaluate(() => {
+      const c = window.__NOVA.game.camera;
+      return {
+        x: window.__NOVA.game.player.position.x, z: window.__NOVA.game.player.position.z,
+        // the stick was dragged right, so the ship must travel along the
+        // camera's right axis — which is only world +X while the rig is locked
+        rightX: -Math.cos(c.rigYaw), rightZ: Math.sin(c.rigYaw),
+      };
+    });
     await tp.mouse.up();
-    check('move stick drives the ship', Math.abs(after.x - before.x) > 2, `dx=${(after.x - before.x).toFixed(1)} dz=${(after.z - before.z).toFixed(1)}`);
+    const travelled = (after.x - before.x) * after.rightX + (after.z - before.z) * after.rightZ;
+    check('move stick drives the ship', travelled > 2,
+      `${travelled.toFixed(1)} along camera-right (dx=${(after.x - before.x).toFixed(1)} dz=${(after.z - before.z).toFixed(1)})`);
 
     // aim stick should both aim and open fire
     const astick = await tp.locator('#stick-aim').boundingBox();
@@ -778,6 +788,117 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
       check('mobile profile renders a lit scene', r.lum.mean > 6 && r.lum.max > 60, `mean ${r.lum.mean}, peak ${r.lum.max}`);
       await c.close();
     }
+  }
+
+  // ---------------- camera rigs ----------------
+  section('CAMERA RIGS');
+  {
+    const rig = async (style) => page.evaluate((st) => {
+      const N = window.__NOVA;
+      N.game.setSetting('cameraStyle', st);
+      N.start('striker', 'pilot', 'campaign', 4);
+      N.skipCinematic();
+      for (let i = 0; i < 90; i++) { N.step(1 / 60, 1); }
+      const c = N.game.camera, cam = c.camera;
+      const dx = cam.position.x - N.game.player.position.x;
+      const dz = cam.position.z - N.game.player.position.z;
+      return {
+        style: c.style,
+        height: +cam.position.y.toFixed(2),
+        ground: +Math.hypot(dx, dz).toFixed(2),
+        // angle above the horizon: the whole complaint was that this was too steep
+        pitch: +(Math.atan2(cam.position.y, Math.hypot(dx, dz)) * 180 / Math.PI).toFixed(1),
+        fov: +cam.fov.toFixed(1),
+      };
+    }, style);
+
+    const top = await rig('tactical');
+    const chase = await rig('chase');
+    const pov = await rig('pov');
+    console.log(`    tactical ${top.pitch}deg · chase ${chase.pitch}deg · pov ${pov.pitch}deg`);
+    check('tactical stays the old high board view', top.pitch > 45, `${top.pitch}deg`);
+    check('chase looks along the deck, not down at it', chase.pitch > 15 && chase.pitch < 40, `${chase.pitch}deg`);
+    check('pov is the lowest rig', pov.pitch < chase.pitch && pov.pitch > 15, `${pov.pitch}deg`);
+    check('a low rig sees past the arena edge', chase.fov >= 60 && pov.fov >= 60, `chase ${chase.fov}, pov ${pov.fov}`);
+
+    // the horizontal angle is what blows out on a phone, not the vertical one
+    const wide = await page.evaluate(() => {
+      const c = window.__NOVA.game.camera;
+      const h = (a) => {
+        const v = c.fovFor(c.baseFov, a) * Math.PI / 180;
+        return 2 * Math.atan(Math.tan(v / 2) * a) * 180 / Math.PI;
+      };
+      return { a16: +h(16 / 9).toFixed(1), ultra: +h(2.17).toFixed(1), portrait: +h(0.46).toFixed(1) };
+    });
+    check('horizontal field of view never fisheyes', wide.a16 < 100 && wide.ultra < 100,
+      `16:9 ${wide.a16}deg, 21:9 ${wide.ultra}deg, portrait ${wide.portrait}deg`);
+
+    // Turning is gated on the aim source: an absolute cursor's ground point
+    // rotates with the camera, so following it would spin the rig forever.
+    const turn = await page.evaluate(() => {
+      const N = window.__NOVA;
+      N.game.setSetting('cameraStyle', 'pov');
+      N.start('striker', 'pilot', 'campaign', 4);
+      N.skipCinematic();
+      const start = N.game.camera.rigYaw;
+      N.setInput({ aim: { x: 1, z: 0 }, move: { x: 0, z: 0 } });
+      for (let i = 0; i < 180; i++) { N.step(1 / 60, 1); }
+      const stick = N.game.camera.rigYaw;
+      N.clearInput();
+      // a pointer must leave the rig alone, and it must settle back world-locked
+      N.game.input.aim.mode = 'pointer';
+      N.game.input.aim.active = true;
+      for (let i = 0; i < 300; i++) { N.step(1 / 60, 1); }
+      return { start: +start.toFixed(3), stick: +stick.toFixed(3), pointer: +N.game.camera.rigYaw.toFixed(3) };
+    });
+    check('stick aiming swings the rig behind the ship', Math.abs(turn.stick - turn.start) > 0.5,
+      `${turn.start} -> ${turn.stick}`);
+    check('cursor aiming leaves the rig world-locked', Math.abs(turn.pointer - Math.PI) < 0.05,
+      `settled at ${turn.pointer}`);
+
+    // scripted input is a world-space channel and must survive a turned rig
+    const world = await page.evaluate(() => {
+      const N = window.__NOVA;
+      N.start('striker', 'pilot', 'campaign', 4);
+      N.skipCinematic();
+      N.game.camera.rigYaw = 1.1;                 // deliberately off world-lock
+      const b = { x: N.game.player.position.x, z: N.game.player.position.z };
+      N.setInput({ move: { x: 1, z: 0 } });
+      for (let i = 0; i < 60; i++) { N.step(1 / 60, 1); }
+      const a = { x: N.game.player.position.x, z: N.game.player.position.z };
+      N.clearInput();
+      return { dx: +(a.x - b.x).toFixed(2), dz: +(a.z - b.z).toFixed(2) };
+    });
+    check('scripted input stays world-space whatever the rig does', world.dx > 2 && Math.abs(world.dz) < 1.5,
+      `dx=${world.dx} dz=${world.dz}`);
+
+    // a cinematic that does not land on the rig pose snaps when it hands back
+    const handoff = await page.evaluate(async () => {
+      const N = window.__NOVA;
+      N.game.setSetting('cameraStyle', 'chase');
+      N.start('striker', 'pilot', 'campaign', 4);
+      for (let i = 0; i < 200; i++) { N.step(1 / 60, 1); }   // ~3.3s: the intro runs out
+      const p = N.game.player.position;
+      const rest = N.game.camera.restPose(p.x, p.z);
+      const c = N.game.camera.camera.position;
+      return +Math.hypot(c.x - rest.pos[0], c.y - rest.pos[1], c.z - rest.pos[2]).toFixed(2);
+    });
+    check('the deployment cinematic hands back without a jump', handoff < 6, `${handoff} units from the rest pose`);
+
+    // a low rig points at the horizon; the reticle must not fly to infinity
+    const aim = await page.evaluate(() => {
+      const N = window.__NOVA;
+      const c = N.game.camera, out = new THREE.Vector3();
+      let worst = 0;
+      for (const sy of [0, 4, 40, 200, 700]) {
+        c.screenToGround(640, sy, 1280, 720, out);
+        worst = Math.max(worst, Math.hypot(out.x - c.camera.position.x, out.z - c.camera.position.z));
+      }
+      return +worst.toFixed(1);
+    });
+    check('aiming at the horizon stays bounded', aim <= 121, `furthest ${aim} units`);
+
+    await page.evaluate(() => window.__NOVA.game.setSetting('cameraStyle', 'pov'));
   }
 
   // ---------------- rigs & animation ----------------

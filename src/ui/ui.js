@@ -300,6 +300,17 @@ export class UI {
       { value: 'auto', label: 'AUTO' }, { value: 'low', label: 'LOW' },
       { value: 'medium', label: 'MED' }, { value: 'high', label: 'HIGH' },
     ]);
+    choice('CAMERA', 'cameraStyle', [
+      { value: 'pov', label: 'POV' }, { value: 'chase', label: 'CHASE' }, { value: 'tactical', label: 'TOP' },
+    ]);
+    const camHint = document.createElement('p');
+    camHint.style.cssText = 'margin:-4px 0 6px;color:#8ea6c4;font-size:12px;line-height:1.45';
+    camHint.textContent = {
+      pov: 'Over-the-shoulder. The camera swings behind the ship as you turn — stick and touch aiming only; a mouse cursor keeps the view world-locked.',
+      chase: 'Low and wide, but world-locked: north is always up the screen.',
+      tactical: 'High board view. Flattest, but you can see the whole deck.',
+    }[s.cameraStyle] || '';
+    host.appendChild(camHint);
     slider('SCREEN SHAKE', 'shake', (v) => `${Math.round(v * 100)}%`, 0, 1.5, 0.05);
     toggle('DAMAGE NUMBERS', 'damageNumbers');
     toggle('SCANLINES', 'scanlines');

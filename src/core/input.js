@@ -23,7 +23,9 @@ export class Input {
     this.keys = new Set();
     this.keyEdges = new Set();
     this.move = { x: 0, z: 0 };
-    this.aim = { mode: 'pointer', screenX: 0, screenY: 0, dirX: 0, dirZ: 1, active: false };
+    // rawX/rawZ are the stick's own axes; dirX/dirZ are those rotated into
+    // world space each frame against the camera basis (see sample).
+    this.aim = { mode: 'pointer', screenX: 0, screenY: 0, dirX: 0, dirZ: -1, rawX: 0, rawZ: -1, active: false };
     this.fire = false;
     this.firePulse = false;      // "pulse" as in secondary weapon, held
     this.dashEdge = false;
@@ -108,7 +110,11 @@ export class Input {
   /** Wire the on-screen sticks/buttons (called once the DOM overlay exists). */
   bindTouch(els) {
     if (!els) return;
-    const mkStick = (el, key) => {
+    // `ownsAim` matters: only the aim stick may declare stick aiming. The move
+    // stick used to do it too, which told the game a facing was being steered
+    // when it was not — and a rig that turns to follow the ship then chased a
+    // direction nobody had chosen.
+    const mkStick = (el, key, ownsAim) => {
       if (!el) return;
       const knob = el.querySelector('i');
       const radius = 46;
@@ -122,7 +128,8 @@ export class Input {
       const clear = () => { knob.style.transform = ''; this._sticks[key] = null; id = null; };
       el.addEventListener('pointerdown', (e) => {
         id = e.pointerId; el.setPointerCapture(id);
-        this.scheme = 'touch'; this.aim.mode = 'stick';
+        this.scheme = 'touch';
+        if (ownsAim) this.aim.mode = 'stick';
         const r = el.getBoundingClientRect();
         set(e.clientX - (r.left + r.width / 2), e.clientY - (r.top + r.height / 2));
         e.preventDefault();
@@ -137,8 +144,8 @@ export class Input {
       el.addEventListener('pointercancel', end);
       el.addEventListener('lostpointercapture', end);
     };
-    mkStick(els.move, 'move');
-    mkStick(els.aim, 'aim');
+    mkStick(els.move, 'move', false);
+    mkStick(els.aim, 'aim', true);
 
     const mkBtn = (el, key) => {
       if (!el) return;
@@ -174,8 +181,15 @@ export class Input {
     for (const k in this._edgeLatch) this._edgeLatch[k] = false;
   }
 
-  /** Called by the game each frame *before* systems read intent. */
-  sample(dt) {
+  /**
+   * Called by the game each frame *before* systems read intent.
+   *
+   * `rigYaw` is the camera's azimuth. Device intents are expressed relative to
+   * the screen, so they are rotated into world space here — with a turning rig,
+   * "forward" means wherever the camera looks, not north. The scripted override
+   * below is deliberately applied afterwards: it speaks world space.
+   */
+  sample(dt, rigYaw = Math.PI) {
     if (this.suppress > 0) this.suppress -= dt;
     const locked = !this.enabled || this.suppress > 0;
 
@@ -215,7 +229,7 @@ export class Input {
       if (rr > DEADZONE && !locked) {
         this.scheme = 'gamepad';
         this.aim.mode = 'stick';
-        this.aim.dirX = rx / rr; this.aim.dirZ = ry / rr;
+        this.aim.rawX = rx / rr; this.aim.rawZ = ry / rr;
         this.aim.active = true;
         fire = true;                                   // twin-stick: aiming shoots
       }
@@ -249,7 +263,7 @@ export class Input {
         const l = lengthXZ(sa.x, sa.z);
         if (l > 0.25) {
           this.aim.mode = 'stick';
-          this.aim.dirX = sa.x / l; this.aim.dirZ = sa.z / l;
+          this.aim.rawX = sa.x / l; this.aim.rawZ = sa.z / l;
           this.aim.active = true;
           fire = true;
         }
@@ -265,7 +279,15 @@ export class Input {
 
     const len = lengthXZ(mx, mz);
     if (len > 1) { mx /= len; mz /= len; }
-    this.move.x = mx; this.move.z = mz;
+
+    // screen basis -> world. Identity at rigYaw = PI, which is every
+    // world-locked rig, so this costs nothing when the camera does not turn.
+    const fx = Math.sin(rigYaw), fz = Math.cos(rigYaw);
+    const rx = -Math.cos(rigYaw), rz = Math.sin(rigYaw);
+    this.move.x = -mz * fx + mx * rx;
+    this.move.z = -mz * fz + mx * rz;
+    this.aim.dirX = -this.aim.rawZ * fx + this.aim.rawX * rx;
+    this.aim.dirZ = -this.aim.rawZ * fz + this.aim.rawX * rz;
 
     this.fireHeld = fire;
     this.pulseHeld = pulseHeld;

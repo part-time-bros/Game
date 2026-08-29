@@ -17,6 +17,7 @@ const DEFAULT_SETTINGS = {
   flashes: true,
   showPerf: false,
   cameraRotate: true,   // camera eases toward aim direction
+  cameraStyle: 'pov',   // pov | chase | tactical (see render/camera.js)
 };
 
 const DEFAULT_RECORD = {

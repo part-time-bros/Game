@@ -445,8 +445,12 @@ body.touch #hud-bottom{
   top:clamp(66px,12vh,92px);bottom:auto;align-items:flex-start;
   gap:clamp(10px,3vw,28px);
 }
-body.touch .vitals{max-width:40vw;gap:5px;}
-body.touch .power{max-width:38vw;gap:5px;}
+/* The low camera puts the horizon and the far deck in the upper third, so the
+   readouts stay narrow and hug the edges instead of straddling the action. */
+body.touch .vitals{max-width:29vw;gap:4px;}
+body.touch .power{max-width:29vw;gap:4px;}
+body.touch .vital-tag{width:28px;font-size:9px;}
+body.touch .vital-num{width:30px;font-size:12px;}
 body.touch .bar{height:11px;}
 body.touch .power .bar{flex:0 0 11px;}
 body.touch .dash-charges{height:7px;}

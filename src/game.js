@@ -200,7 +200,14 @@ export class Game {
     if (this.screen) this.screen.shakeScale = reduce ? Math.min(s.shake, 0.25) : s.shake;
     document.body.classList.toggle('no-scanlines', !s.scanlines);
     document.body.classList.toggle('no-flash', !s.flashes);
-    if (this.camera) this.camera.enableLead = s.cameraRotate;
+    if (this.camera) {
+      this.camera.enableLead = s.cameraRotate;
+      const rig = this.camera.setStyle(s.cameraStyle);
+      // A low rig looks at the horizon, so the fog has to reach further out or
+      // the far half of the deck turns into a grey wall.
+      globalUniforms.uFogNear.value = rig.fogNear;
+      globalUniforms.uFogFar.value = rig.fogFar;
+    }
     this.resize();
   }
 
@@ -271,7 +278,7 @@ export class Game {
     this.enemyDamageMult = this.difficulty.enemyDamage;
 
     this.player.reset(shipId, this.difficulty.playerHp);
-    this.camera.snapTo(this.player.position.x, this.player.position.z);
+    this.camera.snapTo(this.player.position.x, this.player.position.z, this.player.yaw);
     this.world.reset();
     this.waves.reset();
 
@@ -293,7 +300,7 @@ export class Game {
     this.input.lock(0.3);
 
     this.director.cancel();
-    this.director.play(runStartSequence(this.player.position.x, this.player.position.z), () => {
+    this.director.play(runStartSequence(this.player.position.x, this.player.position.z, this.camera), () => {
       // Guard: a wave may already have been forced to start (debug tooling, or
       // a skip that raced the callback). Never rewind it to wave 1.
       if (this.state === 'playing' && this.waves.wave === 0) this.waves.start(1);
@@ -377,7 +384,7 @@ export class Game {
     this.audio.setIntensity(0);
     this.audio.play('defeat');
     this.screen.desaturate = 0.85;
-    this.director.play(defeatSequence(this.player.position.x, this.player.position.z), () => this.endRun(false));
+    this.director.play(defeatSequence(this.player.position.x, this.player.position.z, this.camera), () => this.endRun(false));
   }
 
   onBossDefeated(boss) {
@@ -406,7 +413,7 @@ export class Game {
     if (isFinal) {
       this.after(0.8, () => {
         if (this.state !== 'playing') return;
-        this.director.play(victorySequence(this.player.position.x, this.player.position.z), () => this.endRun(true));
+        this.director.play(victorySequence(this.player.position.x, this.player.position.z, this.camera), () => this.endRun(true));
       });
       return;
     }
@@ -732,7 +739,7 @@ export class Game {
       this.director.update(dtReal);
       this.input.enabled = !this.director.lockInput;
     }
-    this.input.sample(dtReal);
+    this.input.sample(dtReal, this.camera ? this.camera.rigYaw : Math.PI);
     if (this.director && this.director.running) {
       // any deliberate input skips an intro — unskippable cutscenes age badly
       const wants = this.input.anyEdge || this.input.fireHeld
@@ -856,8 +863,10 @@ export class Game {
       this.camera.parkTarget(p.position.x, p.position.z);
       this.director.applyTo(this.camera.camera);
     } else {
+      // Only a stick may steer the rig — see GameCamera.follow.
+      const turnTo = this.input.aim.mode === 'stick' ? p.yaw : null;
       this.camera.follow(p, this._aimWorld, dtReal, this.screen, this.boss.active ? 0.7 : 0,
-        this.boss.active ? this.boss : null);
+        this.boss.active ? this.boss : null, turnTo);
     }
     this.world.update(dt, p.position, p.overdriveActive > 0 ? 0.4 : 0);
     this.audio.setIntensity(clamp01(0.25 + threat * 0.6 + (p.overdriveActive > 0 ? 0.3 : 0)));

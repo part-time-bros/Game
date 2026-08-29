@@ -43,7 +43,10 @@ export class World {
     scene.add(this.shell);
 
     // ---------- containment barrier ----------
-    this.barrierMat = createEnergyMaterial({ color: 0x46e6ff, opacity: 0.30, power: 3.2, pulse: 0.16 });
+    // A low camera looks along the barrier instead of down through it, and an
+    // additive shell seen edge-on stacks into a solid wall. A tighter fresnel
+    // keeps it a rim highlight from every angle.
+    this.barrierMat = createEnergyMaterial({ color: 0x46e6ff, opacity: 0.30, power: 4.4, pulse: 0.16 });
     this.barrier = new THREE.Mesh(new THREE.CylinderGeometry(this.radius, this.radius, 6.5, 72, 1, true), this.barrierMat);
     this.barrier.position.y = 3.1;
     this.barrier.renderOrder = 7;
@@ -303,7 +306,7 @@ export class World {
     this.islands.rotation.y += dt * 0.006;
     for (const m of this._mistMats) m.uniforms.uTime.value = this.time;
     this._moteMat.uniforms.uTime.value = this.time;
-    this.barrierMat.uniforms.uOpacity.value = 0.075 + this.threat * 0.10 + Math.sin(this.time * 1.7) * 0.02;
+    this.barrierMat.uniforms.uOpacity.value = 0.055 + this.threat * 0.075 + Math.sin(this.time * 1.7) * 0.015;
   }
 
   /** Reset per-run visual state. */

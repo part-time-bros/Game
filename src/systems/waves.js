@@ -322,7 +322,7 @@ export class WaveDirector {
     const cycle = Math.max(0, Math.floor((this.wave - 1) / 15));
     const boss = g.boss.spawn(kind, 1 + cycle * 0.7 + (this.wave > 15 ? (this.wave - 15) * 0.035 : 0));
     if (boss && g.director) {
-      g.director.play(bossIntroSequence(boss, g.player.position.x, g.player.position.z));
+      g.director.play(bossIntroSequence(boss, g.player.position.x, g.player.position.z, g.camera));
     }
   }
 

@@ -463,8 +463,12 @@ body.touch #hud-bottom{
   top:clamp(66px,12vh,92px);bottom:auto;align-items:flex-start;
   gap:clamp(10px,3vw,28px);
 }
-body.touch .vitals{max-width:40vw;gap:5px;}
-body.touch .power{max-width:38vw;gap:5px;}
+/* The low camera puts the horizon and the far deck in the upper third, so the
+   readouts stay narrow and hug the edges instead of straddling the action. */
+body.touch .vitals{max-width:29vw;gap:4px;}
+body.touch .power{max-width:29vw;gap:4px;}
+body.touch .vital-tag{width:28px;font-size:9px;}
+body.touch .vital-num{width:30px;font-size:12px;}
 body.touch .bar{height:11px;}
 body.touch .power .bar{flex:0 0 11px;}
 body.touch .dash-charges{height:7px;}
@@ -920,6 +924,7 @@ const DEFAULT_SETTINGS = {
   flashes: true,
   showPerf: false,
   cameraRotate: true,   // camera eases toward aim direction
+  cameraStyle: 'pov',   // pov | chase | tactical (see render/camera.js)
 };
 
 const DEFAULT_RECORD = {
@@ -1655,7 +1660,9 @@ class Input {
     this.keys = new Set();
     this.keyEdges = new Set();
     this.move = { x: 0, z: 0 };
-    this.aim = { mode: 'pointer', screenX: 0, screenY: 0, dirX: 0, dirZ: 1, active: false };
+    // rawX/rawZ are the stick's own axes; dirX/dirZ are those rotated into
+    // world space each frame against the camera basis (see sample).
+    this.aim = { mode: 'pointer', screenX: 0, screenY: 0, dirX: 0, dirZ: -1, rawX: 0, rawZ: -1, active: false };
     this.fire = false;
     this.firePulse = false;      // "pulse" as in secondary weapon, held
     this.dashEdge = false;
@@ -1740,7 +1747,11 @@ class Input {
   /** Wire the on-screen sticks/buttons (called once the DOM overlay exists). */
   bindTouch(els) {
     if (!els) return;
-    const mkStick = (el, key) => {
+    // `ownsAim` matters: only the aim stick may declare stick aiming. The move
+    // stick used to do it too, which told the game a facing was being steered
+    // when it was not — and a rig that turns to follow the ship then chased a
+    // direction nobody had chosen.
+    const mkStick = (el, key, ownsAim) => {
       if (!el) return;
       const knob = el.querySelector('i');
       const radius = 46;
@@ -1754,7 +1765,8 @@ class Input {
       const clear = () => { knob.style.transform = ''; this._sticks[key] = null; id = null; };
       el.addEventListener('pointerdown', (e) => {
         id = e.pointerId; el.setPointerCapture(id);
-        this.scheme = 'touch'; this.aim.mode = 'stick';
+        this.scheme = 'touch';
+        if (ownsAim) this.aim.mode = 'stick';
         const r = el.getBoundingClientRect();
         set(e.clientX - (r.left + r.width / 2), e.clientY - (r.top + r.height / 2));
         e.preventDefault();
@@ -1769,8 +1781,8 @@ class Input {
       el.addEventListener('pointercancel', end);
       el.addEventListener('lostpointercapture', end);
     };
-    mkStick(els.move, 'move');
-    mkStick(els.aim, 'aim');
+    mkStick(els.move, 'move', false);
+    mkStick(els.aim, 'aim', true);
 
     const mkBtn = (el, key) => {
       if (!el) return;
@@ -1806,8 +1818,15 @@ class Input {
     for (const k in this._edgeLatch) this._edgeLatch[k] = false;
   }
 
-  /** Called by the game each frame *before* systems read intent. */
-  sample(dt) {
+  /**
+   * Called by the game each frame *before* systems read intent.
+   *
+   * `rigYaw` is the camera's azimuth. Device intents are expressed relative to
+   * the screen, so they are rotated into world space here — with a turning rig,
+   * "forward" means wherever the camera looks, not north. The scripted override
+   * below is deliberately applied afterwards: it speaks world space.
+   */
+  sample(dt, rigYaw = Math.PI) {
     if (this.suppress > 0) this.suppress -= dt;
     const locked = !this.enabled || this.suppress > 0;
 
@@ -1847,7 +1866,7 @@ class Input {
       if (rr > DEADZONE && !locked) {
         this.scheme = 'gamepad';
         this.aim.mode = 'stick';
-        this.aim.dirX = rx / rr; this.aim.dirZ = ry / rr;
+        this.aim.rawX = rx / rr; this.aim.rawZ = ry / rr;
         this.aim.active = true;
         fire = true;                                   // twin-stick: aiming shoots
       }
@@ -1881,7 +1900,7 @@ class Input {
         const l = lengthXZ(sa.x, sa.z);
         if (l > 0.25) {
           this.aim.mode = 'stick';
-          this.aim.dirX = sa.x / l; this.aim.dirZ = sa.z / l;
+          this.aim.rawX = sa.x / l; this.aim.rawZ = sa.z / l;
           this.aim.active = true;
           fire = true;
         }
@@ -1897,7 +1916,15 @@ class Input {
 
     const len = lengthXZ(mx, mz);
     if (len > 1) { mx /= len; mz /= len; }
-    this.move.x = mx; this.move.z = mz;
+
+    // screen basis -> world. Identity at rigYaw = PI, which is every
+    // world-locked rig, so this costs nothing when the camera does not turn.
+    const fx = Math.sin(rigYaw), fz = Math.cos(rigYaw);
+    const rx = -Math.cos(rigYaw), rz = Math.sin(rigYaw);
+    this.move.x = -mz * fx + mx * rx;
+    this.move.z = -mz * fz + mx * rz;
+    this.aim.dirX = -this.aim.rawZ * fx + this.aim.rawX * rx;
+    this.aim.dirZ = -this.aim.rawZ * fz + this.aim.rawX * rz;
 
     this.fireHeld = fire;
     this.pulseHeld = pulseHeld;
@@ -5145,20 +5172,54 @@ const QUALITY_TIERS = QUALITY;
 /**
  * camera.js — the chase rig.
  *
- * Yaw stays world-locked (twin-stick readability: "up" is always the same
- * direction) while distance, height, look-ahead and FOV all breathe with speed,
- * aim and threat. Shake, roll and hit-punch are layered on last.
+ * Three rigs, because the viewing angle changes what kind of game this is:
+ *
+ *   pov       over-the-shoulder. Low and close, and the rig swings round behind
+ *             the ship as it turns. This is the one that reads as 3D.
+ *   chase     the same low, wide framing but world-locked, so "up" is always
+ *             north — every threat keeps a fixed screen direction.
+ *   tactical  the old high board view. Flat-looking, but you see everything.
+ *
+ * Distance, height, look-ahead and FOV all breathe with speed, aim and threat
+ * on top of whichever rig is active. Shake, roll and hit-punch are layered last.
  */
 
-const GROUND_Y = 1.05;   // aim plane sits at ship height
+const GROUND_Y = 1.05;      // aim plane sits at ship height
+const MAX_AIM = 120;        // a grazing ray must not fling the reticle to infinity
+const WORLD_LOCKED = Math.PI;   // rig azimuth that puts the camera due south
+
+/**
+ * height/distance set the pitch — the whole point of the change. `look` is the
+ * height of the look-at point: raising it tilts the rig up, which drops the ship
+ * down the screen and puts sky above the horizon.
+ */
+const RIGS = {
+  pov: { height: 8.0, distance: 16.0, fov: 70, look: 2.4, turns: true, fogNear: 105, fogFar: 330 },
+  chase: { height: 14.0, distance: 24.0, fov: 66, look: 2.0, turns: false, fogNear: 110, fogFar: 340 },
+  tactical: { height: 26.5, distance: 19.5, fov: 56, look: 0.6, turns: false, fogNear: 90, fogFar: 260 },
+};
+
+/**
+ * Horizontal field of view is what actually blows out on a phone: a 70-degree
+ * vertical rig on a 21:9 landscape screen is a 113-degree fisheye where the ship
+ * is a speck. Cap the horizontal angle and let the vertical give way.
+ */
+const MAX_H_FOV = 96 * DEG;
+
+const CAMERA_STYLES = RIGS;
 
 class GameCamera {
   constructor(aspect = 16 / 9) {
     this.camera = new THREE.PerspectiveCamera(56, aspect, 0.5, 900);
-    this.baseFov = 56;
+    this.style = 'pov';
+    this.rig = RIGS.pov;
+    this.baseFov = this.rig.fov;
+    // Azimuth the rig looks along. PI = looking north from due south, which is
+    // the world-locked pose every non-turning rig holds.
+    this.rigYaw = WORLD_LOCKED;
     this.target = new THREE.Vector3(0, 0, 0);
     this.smoothTarget = new THREE.Vector3(0, 0, 0);
-    this.offset = new THREE.Vector3(0, 26.5, 19.5);
+    this.offset = new THREE.Vector3(0, this.rig.height, this.rig.distance);
     this.distanceScale = 1;
     this.targetDistanceScale = 1;
     this.lead = new THREE.Vector3();
@@ -5175,11 +5236,46 @@ class GameCamera {
     this.shakeOffset = new THREE.Vector3();
   }
 
+  /** Switch rigs. Unknown names fall back to the over-the-shoulder default. */
+  setStyle(name) {
+    const rig = RIGS[name] || RIGS.pov;
+    this.style = RIGS[name] ? name : 'pov';
+    this.rig = rig;
+    this.baseFov = rig.fov;
+    if (!rig.turns) this.rigYaw = WORLD_LOCKED;
+    this.setAspect(this.camera.aspect);
+    return this.rig;
+  }
+
+  /** Unit vector the rig looks along, on the ground plane. */
+  get forwardX() { return Math.sin(this.rigYaw); }
+  get forwardZ() { return Math.cos(this.rigYaw); }
+
+  /**
+   * Where the follow rig would rest over a point. Cinematics land on this
+   * instead of hard-coded numbers, so they hand back without a jump whichever
+   * rig is active.
+   */
+  restPose(x, z) {
+    const r = this.rig;
+    return {
+      pos: [x - this.forwardX * r.distance, r.height, z - this.forwardZ * r.distance],
+      target: [x, r.look, z],
+      fov: r.fov,
+    };
+  }
+
   setAspect(a) {
     this.camera.aspect = a;
-    // keep a sensible vertical view on ultrawide and on portrait phones
-    this.camera.fov = a < 1 ? clamp(this.baseFov / a * 0.62, 56, 82) : this.baseFov;
+    this.camera.fov = this.fovFor(this.baseFov, a);
     this.camera.updateProjectionMatrix();
+  }
+
+  /** Vertical FOV that keeps both axes sane at any aspect ratio. */
+  fovFor(base, a) {
+    // Portrait has no horizontal room, so it trades vertical angle for reach.
+    if (a < 1) return clamp(base / a * 0.62, base, 92);
+    return Math.min(base, (2 * Math.atan(Math.tan(MAX_H_FOV / 2) / a)) / DEG);
   }
 
   /** Menu / attract-mode slow orbit around the arena. */
@@ -5197,9 +5293,19 @@ class GameCamera {
    * follow(player, aimPoint, dt, fx, threat)
    * player: {position, velocity, speed}
    */
-  follow(player, aimPoint, dt, fx, threat = 0, focus = null) {
+  follow(player, aimPoint, dt, fx, threat = 0, focus = null, turnTo = null) {
     this.mode = 'follow';
     const p = player.position;
+    const rig = this.rig;
+
+    // A turning rig swings round behind the ship. `turnTo` is null whenever the
+    // aim source is an absolute screen cursor: the cursor's ground point rotates
+    // with the camera, so following it would chase its own tail forever.
+    // Falling back to world-locked matters: a rig frozen at whatever azimuth the
+    // last stick input left it at would make camera-relative movement read
+    // against a basis the player can no longer see or change.
+    if (rig.turns && turnTo !== null) this.rigYaw = dampAngle(this.rigYaw, turnTo, 0.0015, dt);
+    else this.rigYaw = dampAngle(this.rigYaw, WORLD_LOCKED, rig.turns ? 0.05 : 0.0004, dt);
 
     // look-ahead blends motion and aim so the player sees where they're going
     let lx = 0, lz = 0;
@@ -5239,18 +5345,21 @@ class GameCamera {
 
     const ds = this.distanceScale;
     const shake = fx ? fx.shake(performance.now() * 0.001) : { x: 0, y: 0, roll: 0 };
+    const fwdX = this.forwardX, fwdZ = this.forwardZ;
+    const dist = rig.distance * ds;
     this.camera.position.set(
-      this.smoothTarget.x + this.offset.x * ds + shake.x,
-      this.offset.y * ds + shake.y,
-      this.smoothTarget.z + this.offset.z * ds,
+      this.smoothTarget.x - fwdX * dist + shake.x,
+      rig.height * (1 + (ds - 1) * 0.55) + shake.y,
+      this.smoothTarget.z - fwdZ * dist,
     );
-    this._tmp.set(this.smoothTarget.x + shake.x * 0.4, 0.6, this.smoothTarget.z);
+    this.offset.set(-fwdX * dist, this.camera.position.y, -fwdZ * dist);
+    this._tmp.set(this.smoothTarget.x + shake.x * 0.4, rig.look, this.smoothTarget.z);
     this.camera.lookAt(this._tmp);
     if (shake.roll) this.camera.rotateZ(shake.roll);
 
-    const fov = this.baseFov + (fx ? fx.fovPunch * 7 : 0) + clamp01(speed / 46) * 2.4;
+    const fov = this.fovFor(this.baseFov + (fx ? fx.fovPunch * 7 : 0) + clamp01(speed / 46) * 2.4, this.camera.aspect);
     if (Math.abs(this.camera.fov - fov) > 0.01) {
-      this.camera.fov = this.camera.aspect < 1 ? clamp(fov / this.camera.aspect * 0.62, 56, 82) : fov;
+      this.camera.fov = fov;
       this.camera.updateProjectionMatrix();
     }
   }
@@ -5268,12 +5377,15 @@ class GameCamera {
   }
 
   /** Snap instantly (run start / restart) so there is no swoop-in. */
-  snapTo(x, z) {
+  snapTo(x, z, facing) {
     this.target.set(x, 0, z);
     this.smoothTarget.set(x, 0, z);
     this.distanceScale = 1;
-    this.camera.position.set(x + this.offset.x, this.offset.y, z + this.offset.z);
-    this.camera.lookAt(x, 0.6, z);
+    if (this.rig.turns && facing !== undefined) this.rigYaw = facing;
+    else this.rigYaw = WORLD_LOCKED;
+    const pose = this.restPose(x, z);
+    this.camera.position.set(pose.pos[0], pose.pos[1], pose.pos[2]);
+    this.camera.lookAt(pose.target[0], pose.target[1], pose.target[2]);
     this.camera.updateMatrixWorld();
   }
 
@@ -5285,11 +5397,22 @@ class GameCamera {
     this._ray.origin.copy(this.camera.position);
     this._ray.direction.copy(this._ndc).sub(this.camera.position).normalize();
     const hit = this._ray.intersectPlane(this._plane, v);
+    const cx = this.camera.position.x, cz = this.camera.position.z;
     if (!hit) {
-      // camera is looking parallel to the plane — fall back to a long forward cast
-      v.copy(this.camera.position).addScaledVector(this._ray.direction, 60);
-      v.y = GROUND_Y;
+      // Pointing at or above the horizon — a low rig sees plenty of sky. Cast
+      // along the ray's horizontal component so the reticle still means
+      // something instead of jumping behind the player.
+      const dx = this._ray.direction.x, dz = this._ray.direction.z;
+      const l = Math.hypot(dx, dz) || 1;
+      v.set(cx + (dx / l) * MAX_AIM, GROUND_Y, cz + (dz / l) * MAX_AIM);
+    } else {
+      // A grazing ray lands absurdly far out; keep the aim point in the arena's
+      // neighbourhood so lead, assist and the reticle all stay sane.
+      const dx = v.x - cx, dz = v.z - cz;
+      const d = Math.hypot(dx, dz);
+      if (d > MAX_AIM) v.set(cx + (dx / d) * MAX_AIM, GROUND_Y, cz + (dz / d) * MAX_AIM);
     }
+    v.y = GROUND_Y;
     return v;
   }
 
@@ -6120,7 +6243,10 @@ class World {
     scene.add(this.shell);
 
     // ---------- containment barrier ----------
-    this.barrierMat = createEnergyMaterial({ color: 0x46e6ff, opacity: 0.30, power: 3.2, pulse: 0.16 });
+    // A low camera looks along the barrier instead of down through it, and an
+    // additive shell seen edge-on stacks into a solid wall. A tighter fresnel
+    // keeps it a rim highlight from every angle.
+    this.barrierMat = createEnergyMaterial({ color: 0x46e6ff, opacity: 0.30, power: 4.4, pulse: 0.16 });
     this.barrier = new THREE.Mesh(new THREE.CylinderGeometry(this.radius, this.radius, 6.5, 72, 1, true), this.barrierMat);
     this.barrier.position.y = 3.1;
     this.barrier.renderOrder = 7;
@@ -6380,7 +6506,7 @@ class World {
     this.islands.rotation.y += dt * 0.006;
     for (const m of this._mistMats) m.uniforms.uTime.value = this.time;
     this._moteMat.uniforms.uTime.value = this.time;
-    this.barrierMat.uniforms.uOpacity.value = 0.075 + this.threat * 0.10 + Math.sin(this.time * 1.7) * 0.02;
+    this.barrierMat.uniforms.uOpacity.value = 0.055 + this.threat * 0.075 + Math.sin(this.time * 1.7) * 0.015;
   }
 
   /** Reset per-run visual state. */
@@ -9772,7 +9898,10 @@ class Director {
 // ======================================================================
 
 /** Deployment: a wide sweep that settles into the normal chase pose. */
-function runStartSequence(px, pz) {
+function runStartSequence(px, pz, cam) {
+  // The last frame has to be exactly where the follow rig rests, or handing
+  // control back snaps. Ask the rig rather than hard-coding a pose.
+  const rest = cam.restPose(px, pz);
   return {
     name: 'runStart',
     skippable: true,
@@ -9781,8 +9910,8 @@ function runStartSequence(px, pz) {
     frames: [
       { t: 0.0, abs: 1, pos: [px + 46, 6, pz + 52], target: [px, 2, pz], fov: 44, letterbox: 1 },
       { t: 1.3, abs: 1, pos: [px + 16, 14, pz + 34], target: [px, 1.4, pz], fov: 50, letterbox: 1 },
-      { t: 2.4, abs: 1, pos: [px + 2, 24, pz + 24], target: [px, 1.0, pz], fov: 56, letterbox: 0.35 },
-      { t: 3.1, abs: 1, pos: [px, 26.5, pz + 19.5], target: [px, 0.6, pz], fov: 56, letterbox: 0 },
+      { t: 2.4, abs: 1, pos: [rest.pos[0] + 3, rest.pos[1] + 6, rest.pos[2] + 6], target: [px, 1.0, pz], fov: rest.fov - 4, letterbox: 0.35 },
+      { t: 3.1, abs: 1, pos: rest.pos, target: rest.target, fov: rest.fov, letterbox: 0 },
     ],
     cues: [
       { t: 0.0, run: (g) => { g.player.beginWarpIn(); g.audio.play('rift', { gain: 0.8 }); } },
@@ -9802,7 +9931,8 @@ function runStartSequence(px, pz) {
 }
 
 /** Boss arrival: letterboxed low-angle push-in on the new threat. */
-function bossIntroSequence(boss, px, pz) {
+function bossIntroSequence(boss, px, pz, cam) {
+  const rest = cam.restPose(px, pz);
   return {
     name: 'bossIntro',
     skippable: true,
@@ -9815,8 +9945,8 @@ function bossIntroSequence(boss, px, pz) {
       { t: 0.4, pos: [19, 2, 22], target: [0, 0, 0], fov: 40, letterbox: 1 },
       { t: 1.9, pos: [-18, 8, 21], target: [0, 1, 0], fov: 44, letterbox: 1 },
       { t: 2.5, pos: [-4, 16, 26], target: [0, 0, 0], fov: 50, letterbox: 1 },
-      { t: 2.9, abs: 1, pos: [px + 6, 24, pz + 26], target: [(px + boss.x) / 2, 3, (pz + boss.z) / 2], fov: 54, letterbox: 0.6 },
-      { t: 3.4, abs: 1, pos: [px, 27, pz + 21], target: [px, 1, pz], fov: 56, letterbox: 0 },
+      { t: 2.9, abs: 1, pos: [rest.pos[0] + 5, rest.pos[1] + 7, rest.pos[2] + 7], target: [(px + boss.x) / 2, 3, (pz + boss.z) / 2], fov: rest.fov - 3, letterbox: 0.6 },
+      { t: 3.4, abs: 1, pos: rest.pos, target: rest.target, fov: rest.fov, letterbox: 0 },
     ],
     cues: [
       { t: 0.15, run: (g) => { g.screen.addTrauma(0.5); } },
@@ -9833,14 +9963,15 @@ function bossIntroSequence(boss, px, pz) {
 }
 
 /** Victory: rise away from the deck as the score settles. */
-function victorySequence(px, pz) {
+function victorySequence(px, pz, cam) {
+  const rest = cam.restPose(px, pz);
   return {
     name: 'victory',
     duration: 3.6,
     lockUntil: 3.6,
     frames: [
-      { abs: 1, t: 0.0, pos: [px, 26.5, pz + 19.5], target: [px, 1, pz], fov: 56, letterbox: 0.5, timeScale: 0.35 },
-      { abs: 1, t: 1.4, pos: [px + 4, 34, pz + 22], target: [px, 2, pz], fov: 52, letterbox: 1, timeScale: 0.6 },
+      { abs: 1, t: 0.0, pos: rest.pos, target: rest.target, fov: rest.fov, letterbox: 0.5, timeScale: 0.35 },
+      { abs: 1, t: 1.4, pos: [rest.pos[0] + 4, rest.pos[1] + 14, rest.pos[2] + 6], target: [px, 2, pz], fov: rest.fov - 5, letterbox: 1, timeScale: 0.6 },
       { abs: 1, t: 3.6, pos: [px + 10, 62, pz + 38], target: [0, 3, 0], fov: 48, letterbox: 1, timeScale: 1 },
     ],
     cues: [
@@ -9851,13 +9982,14 @@ function victorySequence(px, pz) {
 }
 
 /** Defeat: slow push-in on the wreck. */
-function defeatSequence(px, pz) {
+function defeatSequence(px, pz, cam) {
+  const rest = cam.restPose(px, pz);
   return {
     name: 'defeat',
     duration: 2.9,
     lockUntil: 2.9,
     frames: [
-      { abs: 1, t: 0.0, pos: [px, 26.5, pz + 19.5], target: [px, 1, pz], fov: 56, letterbox: 0.4, timeScale: 0.18 },
+      { abs: 1, t: 0.0, pos: rest.pos, target: rest.target, fov: rest.fov, letterbox: 0.4, timeScale: 0.18 },
       { abs: 1, t: 1.2, pos: [px + 3, 12, pz + 12], target: [px, 1.2, pz], fov: 46, letterbox: 1, timeScale: 0.3 },
       { abs: 1, t: 2.9, pos: [px + 5, 7, pz + 9], target: [px, 1.0, pz], fov: 40, letterbox: 1, timeScale: 0.55 },
     ],
@@ -10193,7 +10325,7 @@ class WaveDirector {
     const cycle = Math.max(0, Math.floor((this.wave - 1) / 15));
     const boss = g.boss.spawn(kind, 1 + cycle * 0.7 + (this.wave > 15 ? (this.wave - 15) * 0.035 : 0));
     if (boss && g.director) {
-      g.director.play(bossIntroSequence(boss, g.player.position.x, g.player.position.z));
+      g.director.play(bossIntroSequence(boss, g.player.position.x, g.player.position.z, g.camera));
     }
   }
 
@@ -10516,6 +10648,17 @@ class UI {
       { value: 'auto', label: 'AUTO' }, { value: 'low', label: 'LOW' },
       { value: 'medium', label: 'MED' }, { value: 'high', label: 'HIGH' },
     ]);
+    choice('CAMERA', 'cameraStyle', [
+      { value: 'pov', label: 'POV' }, { value: 'chase', label: 'CHASE' }, { value: 'tactical', label: 'TOP' },
+    ]);
+    const camHint = document.createElement('p');
+    camHint.style.cssText = 'margin:-4px 0 6px;color:#8ea6c4;font-size:12px;line-height:1.45';
+    camHint.textContent = {
+      pov: 'Over-the-shoulder. The camera swings behind the ship as you turn — stick and touch aiming only; a mouse cursor keeps the view world-locked.',
+      chase: 'Low and wide, but world-locked: north is always up the screen.',
+      tactical: 'High board view. Flattest, but you can see the whole deck.',
+    }[s.cameraStyle] || '';
+    host.appendChild(camHint);
     slider('SCREEN SHAKE', 'shake', (v) => `${Math.round(v * 100)}%`, 0, 1.5, 0.05);
     toggle('DAMAGE NUMBERS', 'damageNumbers');
     toggle('SCANLINES', 'scanlines');
@@ -11153,7 +11296,14 @@ class Game {
     if (this.screen) this.screen.shakeScale = reduce ? Math.min(s.shake, 0.25) : s.shake;
     document.body.classList.toggle('no-scanlines', !s.scanlines);
     document.body.classList.toggle('no-flash', !s.flashes);
-    if (this.camera) this.camera.enableLead = s.cameraRotate;
+    if (this.camera) {
+      this.camera.enableLead = s.cameraRotate;
+      const rig = this.camera.setStyle(s.cameraStyle);
+      // A low rig looks at the horizon, so the fog has to reach further out or
+      // the far half of the deck turns into a grey wall.
+      globalUniforms.uFogNear.value = rig.fogNear;
+      globalUniforms.uFogFar.value = rig.fogFar;
+    }
     this.resize();
   }
 
@@ -11224,7 +11374,7 @@ class Game {
     this.enemyDamageMult = this.difficulty.enemyDamage;
 
     this.player.reset(shipId, this.difficulty.playerHp);
-    this.camera.snapTo(this.player.position.x, this.player.position.z);
+    this.camera.snapTo(this.player.position.x, this.player.position.z, this.player.yaw);
     this.world.reset();
     this.waves.reset();
 
@@ -11246,7 +11396,7 @@ class Game {
     this.input.lock(0.3);
 
     this.director.cancel();
-    this.director.play(runStartSequence(this.player.position.x, this.player.position.z), () => {
+    this.director.play(runStartSequence(this.player.position.x, this.player.position.z, this.camera), () => {
       // Guard: a wave may already have been forced to start (debug tooling, or
       // a skip that raced the callback). Never rewind it to wave 1.
       if (this.state === 'playing' && this.waves.wave === 0) this.waves.start(1);
@@ -11330,7 +11480,7 @@ class Game {
     this.audio.setIntensity(0);
     this.audio.play('defeat');
     this.screen.desaturate = 0.85;
-    this.director.play(defeatSequence(this.player.position.x, this.player.position.z), () => this.endRun(false));
+    this.director.play(defeatSequence(this.player.position.x, this.player.position.z, this.camera), () => this.endRun(false));
   }
 
   onBossDefeated(boss) {
@@ -11359,7 +11509,7 @@ class Game {
     if (isFinal) {
       this.after(0.8, () => {
         if (this.state !== 'playing') return;
-        this.director.play(victorySequence(this.player.position.x, this.player.position.z), () => this.endRun(true));
+        this.director.play(victorySequence(this.player.position.x, this.player.position.z, this.camera), () => this.endRun(true));
       });
       return;
     }
@@ -11685,7 +11835,7 @@ class Game {
       this.director.update(dtReal);
       this.input.enabled = !this.director.lockInput;
     }
-    this.input.sample(dtReal);
+    this.input.sample(dtReal, this.camera ? this.camera.rigYaw : Math.PI);
     if (this.director && this.director.running) {
       // any deliberate input skips an intro — unskippable cutscenes age badly
       const wants = this.input.anyEdge || this.input.fireHeld
@@ -11809,8 +11959,10 @@ class Game {
       this.camera.parkTarget(p.position.x, p.position.z);
       this.director.applyTo(this.camera.camera);
     } else {
+      // Only a stick may steer the rig — see GameCamera.follow.
+      const turnTo = this.input.aim.mode === 'stick' ? p.yaw : null;
       this.camera.follow(p, this._aimWorld, dtReal, this.screen, this.boss.active ? 0.7 : 0,
-        this.boss.active ? this.boss : null);
+        this.boss.active ? this.boss : null, turnTo);
     }
     this.world.update(dt, p.position, p.overdriveActive > 0 ? 0.4 : 0);
     this.audio.setIntensity(clamp01(0.25 + threat * 0.6 + (p.overdriveActive > 0 ? 0.3 : 0)));

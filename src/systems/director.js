@@ -153,7 +153,10 @@ export class Director {
 // ======================================================================
 
 /** Deployment: a wide sweep that settles into the normal chase pose. */
-export function runStartSequence(px, pz) {
+export function runStartSequence(px, pz, cam) {
+  // The last frame has to be exactly where the follow rig rests, or handing
+  // control back snaps. Ask the rig rather than hard-coding a pose.
+  const rest = cam.restPose(px, pz);
   return {
     name: 'runStart',
     skippable: true,
@@ -162,8 +165,8 @@ export function runStartSequence(px, pz) {
     frames: [
       { t: 0.0, abs: 1, pos: [px + 46, 6, pz + 52], target: [px, 2, pz], fov: 44, letterbox: 1 },
       { t: 1.3, abs: 1, pos: [px + 16, 14, pz + 34], target: [px, 1.4, pz], fov: 50, letterbox: 1 },
-      { t: 2.4, abs: 1, pos: [px + 2, 24, pz + 24], target: [px, 1.0, pz], fov: 56, letterbox: 0.35 },
-      { t: 3.1, abs: 1, pos: [px, 26.5, pz + 19.5], target: [px, 0.6, pz], fov: 56, letterbox: 0 },
+      { t: 2.4, abs: 1, pos: [rest.pos[0] + 3, rest.pos[1] + 6, rest.pos[2] + 6], target: [px, 1.0, pz], fov: rest.fov - 4, letterbox: 0.35 },
+      { t: 3.1, abs: 1, pos: rest.pos, target: rest.target, fov: rest.fov, letterbox: 0 },
     ],
     cues: [
       { t: 0.0, run: (g) => { g.player.beginWarpIn(); g.audio.play('rift', { gain: 0.8 }); } },
@@ -183,7 +186,8 @@ export function runStartSequence(px, pz) {
 }
 
 /** Boss arrival: letterboxed low-angle push-in on the new threat. */
-export function bossIntroSequence(boss, px, pz) {
+export function bossIntroSequence(boss, px, pz, cam) {
+  const rest = cam.restPose(px, pz);
   return {
     name: 'bossIntro',
     skippable: true,
@@ -196,8 +200,8 @@ export function bossIntroSequence(boss, px, pz) {
       { t: 0.4, pos: [19, 2, 22], target: [0, 0, 0], fov: 40, letterbox: 1 },
       { t: 1.9, pos: [-18, 8, 21], target: [0, 1, 0], fov: 44, letterbox: 1 },
       { t: 2.5, pos: [-4, 16, 26], target: [0, 0, 0], fov: 50, letterbox: 1 },
-      { t: 2.9, abs: 1, pos: [px + 6, 24, pz + 26], target: [(px + boss.x) / 2, 3, (pz + boss.z) / 2], fov: 54, letterbox: 0.6 },
-      { t: 3.4, abs: 1, pos: [px, 27, pz + 21], target: [px, 1, pz], fov: 56, letterbox: 0 },
+      { t: 2.9, abs: 1, pos: [rest.pos[0] + 5, rest.pos[1] + 7, rest.pos[2] + 7], target: [(px + boss.x) / 2, 3, (pz + boss.z) / 2], fov: rest.fov - 3, letterbox: 0.6 },
+      { t: 3.4, abs: 1, pos: rest.pos, target: rest.target, fov: rest.fov, letterbox: 0 },
     ],
     cues: [
       { t: 0.15, run: (g) => { g.screen.addTrauma(0.5); } },
@@ -214,14 +218,15 @@ export function bossIntroSequence(boss, px, pz) {
 }
 
 /** Victory: rise away from the deck as the score settles. */
-export function victorySequence(px, pz) {
+export function victorySequence(px, pz, cam) {
+  const rest = cam.restPose(px, pz);
   return {
     name: 'victory',
     duration: 3.6,
     lockUntil: 3.6,
     frames: [
-      { abs: 1, t: 0.0, pos: [px, 26.5, pz + 19.5], target: [px, 1, pz], fov: 56, letterbox: 0.5, timeScale: 0.35 },
-      { abs: 1, t: 1.4, pos: [px + 4, 34, pz + 22], target: [px, 2, pz], fov: 52, letterbox: 1, timeScale: 0.6 },
+      { abs: 1, t: 0.0, pos: rest.pos, target: rest.target, fov: rest.fov, letterbox: 0.5, timeScale: 0.35 },
+      { abs: 1, t: 1.4, pos: [rest.pos[0] + 4, rest.pos[1] + 14, rest.pos[2] + 6], target: [px, 2, pz], fov: rest.fov - 5, letterbox: 1, timeScale: 0.6 },
       { abs: 1, t: 3.6, pos: [px + 10, 62, pz + 38], target: [0, 3, 0], fov: 48, letterbox: 1, timeScale: 1 },
     ],
     cues: [
@@ -232,13 +237,14 @@ export function victorySequence(px, pz) {
 }
 
 /** Defeat: slow push-in on the wreck. */
-export function defeatSequence(px, pz) {
+export function defeatSequence(px, pz, cam) {
+  const rest = cam.restPose(px, pz);
   return {
     name: 'defeat',
     duration: 2.9,
     lockUntil: 2.9,
     frames: [
-      { abs: 1, t: 0.0, pos: [px, 26.5, pz + 19.5], target: [px, 1, pz], fov: 56, letterbox: 0.4, timeScale: 0.18 },
+      { abs: 1, t: 0.0, pos: rest.pos, target: rest.target, fov: rest.fov, letterbox: 0.4, timeScale: 0.18 },
       { abs: 1, t: 1.2, pos: [px + 3, 12, pz + 12], target: [px, 1.2, pz], fov: 46, letterbox: 1, timeScale: 0.3 },
       { abs: 1, t: 2.9, pos: [px + 5, 7, pz + 9], target: [px, 1.0, pz], fov: 40, letterbox: 1, timeScale: 0.55 },
     ],

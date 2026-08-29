@@ -176,6 +176,19 @@ watchdog reads the canvas back and steps down: HDR targets, then plain 8-bit
 targets, then straight to the canvas with the shaders tone mapping on their own.
 A duller frame beats a black one.
 
+The camera offers three rigs, because the viewing angle decides what kind of
+game this is. **POV** (the default) is over-the-shoulder — low, close, and it
+swings round behind the ship as you turn, so the deck has real depth and the
+horizon is in frame. It follows a facing only when you are aiming with a stick
+or a thumb: an absolute mouse cursor's ground point rotates *with* the camera,
+so a rig that chased it would spin forever, and with a cursor the rig stays
+world-locked instead. **Chase** keeps that low framing but never turns, so north
+is always up the screen. **Tactical** is the old high board view. Directional
+input is rotated into world space against the camera basis, so "forward" means
+wherever you are looking; the scripted test channel deliberately bypasses that
+and stays world-space. Horizontal field of view is capped at 96 degrees, because
+a 70-degree vertical rig on a 21:9 phone is otherwise a 113-degree fisheye.
+
 Animation is bespoke for a related reason: three's skinning path needs GLSL3
 `texelFetch`, which would drag the whole shader family to ES 3.00. These models
 are hard-surface robots where every vertex belongs to exactly one bone, so
