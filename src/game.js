@@ -1005,7 +1005,14 @@ export class Game {
       setInput: (o) => { g.input.override = o; },
       setCamera: (c) => { g.debugCamera = c; },
       freeze: (on = true) => { g.debugFreeze = !!on; },
-      skipCinematic: () => { g.director.cancel(); g.input.enabled = true; },
+      skipCinematic: () => {
+        // finish the sequence rather than abandoning it, so whatever it was
+        // going to start (the first wave) still starts
+        const cb = g.director.onComplete;
+        g.director.cancel();
+        if (cb) cb();
+        g.input.enabled = true;
+      },
       clearInput: () => { g.input.override = null; },
       errors: [],
     };

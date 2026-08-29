@@ -7,6 +7,7 @@
     "start": "node tools/serve.js",
     "dev": "node tools/serve.js",
     "build": "node tools/build.js",
+    "verify": "node tools/build.js && node tools/verify-bundle.mjs",
     "test": "node tools/playtest.mjs",
     "test:quick": "node tools/playtest.mjs --quick",
     "test:dist": "node tools/build.js && node tools/playtest.mjs --dist",

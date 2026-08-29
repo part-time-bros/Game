@@ -28,6 +28,7 @@ npm test           # 81-check automated playtest in headless Chromium
 npm run test:artifact   # same suite against the host-wrapped build
 npm run test:endurance  # long soak + deep Endless run
 npm run balance         # scripted bot campaigns at every difficulty
+npm run verify          # build, then boot-and-play all three builds (~20s)
 ```
 
 ## Controls
@@ -153,6 +154,7 @@ tools/
   serve.js            zero-dep dev server
   build.js            zero-dep bundler -> dist/nova-lance.html
   playtest.mjs        automated QA suite (81 checks)
+  verify-bundle.mjs   fast boot-and-play gate for all three builds
   endurance.mjs       long soak + deep Endless run (leak/drift detection)
   balance.mjs         scripted bot campaigns for tuning
   audiomix.mjs        offline render of every effect: peak / RMS / duration
@@ -212,6 +214,11 @@ same input path a human uses:
 
 `node tools/balance.mjs` runs bot campaigns at every difficulty and prints
 wave-by-wave clear times, which is how the pacing above was tuned.
+
+`npm run verify` is the publish gate. The module build and the single-file
+bundle can diverge — the bundler strips imports, so anything import-shaped that
+survives into a name is a hazard — and a bundle-only crash has shipped once.
+It builds, then boots *and plays* all three builds in about twenty seconds.
 
 ## Known limitations
 
