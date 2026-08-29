@@ -2783,7 +2783,7 @@ function createNovaMaterial(opts = {}) {
   const m = new THREE.ShaderMaterial({
     vertexShader: NOVA_VERT,
     fragmentShader: NOVA_FRAG,
-    defines: opts.pose ? { RIGGED: '', MAX_BONES: RIG_MAX_BONES } : {},
+    defines: opts.pose ? { RIGGED: '', MAX_BONES } : {},
     transparent: !!opts.transparent,
     depthWrite: opts.depthWrite !== undefined ? opts.depthWrite : true,
     side: opts.side || THREE.FrontSide,

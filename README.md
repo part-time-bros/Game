@@ -24,7 +24,7 @@ HTTP, not `file://`).
 
 ```bash
 npm run build      # regenerate dist/nova-lance.html
-npm test           # 70-check automated playtest in headless Chromium
+npm test           # 81-check automated playtest in headless Chromium
 npm run test:artifact   # same suite against the host-wrapped build
 npm run test:endurance  # long soak + deep Endless run
 npm run balance         # scripted bot campaigns at every difficulty
@@ -152,7 +152,7 @@ src/
 tools/
   serve.js            zero-dep dev server
   build.js            zero-dep bundler -> dist/nova-lance.html
-  playtest.mjs        automated QA suite (70 checks)
+  playtest.mjs        automated QA suite (81 checks)
   endurance.mjs       long soak + deep Endless run (leak/drift detection)
   balance.mjs         scripted bot campaigns for tuning
   audiomix.mjs        offline render of every effect: peak / RMS / duration
@@ -199,6 +199,9 @@ same input path a human uses:
 - resource-leak checks across 12 restarts (geometries, textures, DOM, scene graph)
 - touch end to end: real pointer drags on both sticks, taps on every action button
 - aim-assist cone behaviour
+- every rig: builds, stays under the bone limit, produces finite poses across
+  every clip and every crossfade, and each clip demonstrably moves the skeleton
+- cinematics: lock and release input, survive a skip, and survive a pause
 - abuse passes: restart/dash/pulse/overdrive spam, wave 60, pickup floods,
   quality switching, viewport storms
 - resilience: corrupt save payload, storage denied, WebGL context loss and

@@ -60,11 +60,23 @@ function processModule(rel) {
   let inImport = false;
   for (const line of lines) {
     if (inImport) {                       // consume a wrapped import statement
+      if (/\bas\s+[A-Za-z_$]/.test(line)) {
+        throw new Error(`${rel}: aliased import ("as") is not supported by the bundler — ${line.trim()}`);
+      }
       if (IMPORT_END.test(line)) inImport = false;
       continue;
     }
-    if (IMPORT_ONE_LINE.test(line)) continue;
-    if (IMPORT_START.test(line)) { inImport = !IMPORT_END.test(line); continue; }
+    if (IMPORT_ONE_LINE.test(line) || IMPORT_START.test(line)) {
+      // Imports are stripped, so an alias would leave an undefined name behind.
+      // This is invisible in the dev build (real modules) and fatal in the
+      // bundle, so it has to be a hard error.
+      if (/\bas\s+[A-Za-z_$]/.test(line)) {
+        throw new Error(`${rel}: aliased import ("as") is not supported by the bundler — ${line.trim()}`);
+      }
+      if (IMPORT_ONE_LINE.test(line)) continue;
+      inImport = !IMPORT_END.test(line);
+      continue;
+    }
     if (EXPORT_LIST_RE.test(line)) continue;
     if (/^export\s+default/.test(line)) throw new Error(`${rel}: default exports are not supported`);
     const stripped = line.replace(EXPORT_RE, '');

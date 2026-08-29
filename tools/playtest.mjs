@@ -669,6 +669,106 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
     await tctx.close();
   }
 
+  // ---------------- rigs & animation ----------------
+  section('RIGS & ANIMATION');
+  const rigs = await page.evaluate(async () => {
+    const rig = await import('/src/render/rig.js');
+    const rm = await import('/src/render/rig-models.js');
+    const out = { models: [], errs: [] };
+    const build = { ...rm.RIGGED_ENEMIES, ...rm.RIGGED_BOSSES };
+    for (const name of Object.keys(build)) {
+      try {
+        const spec = build[name]();
+        const pose = new rig.Pose(spec.skeleton);
+        const anim = new rig.Animator(pose, spec.clips);
+        const clips = Object.keys(spec.clips);
+        let moved = 0, bad = 0;
+        for (const clip of clips) {
+          anim.reset();
+          anim.play(clip, { fade: 0 });
+          // sample the whole clip and check the pose actually changes and stays finite
+          const first = [];
+          for (let i = 0; i < 90; i++) {
+            anim.update(1 / 60);
+            for (let b = 0; b < pose.skeleton.count; b++) {
+              const m = pose.matrices[b].elements;
+              for (let k = 0; k < 16; k++) if (!Number.isFinite(m[k])) bad++;
+            }
+            if (i === 0) for (let b = 0; b < pose.skeleton.count; b++) first.push(pose.matrices[b].elements[13]);
+            if (i === 45) {
+              for (let b = 0; b < pose.skeleton.count; b++) {
+                if (Math.abs(pose.matrices[b].elements[13] - first[b]) > 0.001) { moved++; break; }
+              }
+            }
+          }
+        }
+        // a crossfade between two clips must not produce a non-finite pose
+        if (clips.length > 1) {
+          anim.play(clips[0], { fade: 0 });
+          anim.update(0.2);
+          anim.play(clips[1], { fade: 0.3 });
+          for (let i = 0; i < 30; i++) anim.update(1 / 60);
+          for (let b = 0; b < pose.skeleton.count; b++) {
+            const m = pose.matrices[b].elements;
+            for (let k = 0; k < 16; k++) if (!Number.isFinite(m[k])) bad++;
+          }
+        }
+        const geo = spec.geometry;
+        const boneAttr = geo.getAttribute('aBone');
+        let maxBone = 0;
+        for (let i = 0; i < boneAttr.count; i++) maxBone = Math.max(maxBone, boneAttr.getX(i));
+        out.models.push({
+          name, bones: spec.skeleton.count, clips: clips.length,
+          verts: geo.getAttribute('position').count, maxBone, animated: moved, bad,
+        });
+      } catch (e) {
+        out.errs.push(`${name}: ${e.message}`);
+      }
+    }
+    return out;
+  });
+  check('every rig builds and animates', rigs.errs.length === 0, rigs.errs.slice(0, 2).join(' | '));
+  check('no rig produces a non-finite pose', rigs.models.every((m) => m.bad === 0),
+    rigs.models.filter((m) => m.bad).map((m) => m.name).join(','));
+  check('every rig stays under the bone limit', rigs.models.every((m) => m.bones <= 18 && m.maxBone < m.bones),
+    rigs.models.map((m) => `${m.name}:${m.bones}`).join(' '));
+  check('every clip actually moves the skeleton', rigs.models.every((m) => m.animated > 0),
+    rigs.models.filter((m) => !m.animated).map((m) => m.name).join(','));
+  console.log('    ' + rigs.models.map((m) => `${m.name} ${m.bones}b/${m.clips}c`).join('  '));
+
+  // cinematics must always hand the camera back
+  const cine = await page.evaluate(() => {
+    const N = window.__NOVA, g = N.game;
+    const seen = [];
+    N.start('striker', 'pilot', 'campaign', 8);
+    seen.push(g.director.running ? g.director.active.name : null);
+    N.step(1 / 60, 60);
+    const lockedDuring = !g.input.enabled;
+    N.step(1 / 60, 260);
+    const released = g.input.enabled && !g.director.running;
+    // a skip must finish the sequence, not strand the camera
+    N.start('striker', 'pilot', 'campaign', 9);
+    N.step(1 / 60, 45);
+    N.setInput({ fire: true });
+    N.step(1 / 60, 3);
+    N.clearInput();
+    const skipped = !g.director.running;
+    N.step(1 / 60, 120);
+    const waveStarted = g.waves.wave >= 1;
+    // pausing mid-cinematic must not leave input locked
+    N.start('striker', 'pilot', 'campaign', 10);
+    N.step(1 / 60, 30);
+    N.pause();
+    N.resume();
+    N.step(1 / 60, 10);
+    const afterPause = g.input.enabled;
+    return { first: seen[0], lockedDuring, released, skipped, waveStarted, afterPause, state: N.state() };
+  });
+  check('deployment cinematic plays on run start', cine.first === 'runStart', String(cine.first));
+  check('cinematic locks then releases input', cine.lockedDuring && cine.released);
+  check('input skips a cinematic and the wave still starts', cine.skipped && cine.waveStarted);
+  check('pausing mid-cinematic does not strand input', cine.afterPause && cine.state === 'playing', `${cine.afterPause}/${cine.state}`);
+
   // ---------------- aim assist ----------------
   section('AIM ASSIST');
   const assist = await page.evaluate(() => {

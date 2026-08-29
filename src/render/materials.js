@@ -10,7 +10,7 @@
  * correctly) with one key light, a hemisphere fill, a rim term and cheap spec.
  */
 import { noiseTexture, skyTexture, glowSprite } from './textures.js';
-import { MAX_BONES as RIG_MAX_BONES } from './rig.js';
+import { MAX_BONES } from './rig.js';
 
 /** Uniform objects shared by reference across every material instance. */
 export const globalUniforms = {
@@ -146,7 +146,7 @@ export function createNovaMaterial(opts = {}) {
   const m = new THREE.ShaderMaterial({
     vertexShader: NOVA_VERT,
     fragmentShader: NOVA_FRAG,
-    defines: opts.pose ? { RIGGED: '', MAX_BONES: RIG_MAX_BONES } : {},
+    defines: opts.pose ? { RIGGED: '', MAX_BONES } : {},
     transparent: !!opts.transparent,
     depthWrite: opts.depthWrite !== undefined ? opts.depthWrite : true,
     side: opts.side || THREE.FrontSide,
