@@ -178,6 +178,8 @@ export function createNovaMaterial(opts = {}) {
     uRim: { value: opts.rim !== undefined ? opts.rim : 0.32 },
     uDissolve: { value: 0 },
     uDetail: { value: opts.detail !== undefined ? opts.detail : 1 },
+    uBump: { value: opts.bump !== undefined ? opts.bump : 0.07 },
+    uBumpScale: { value: opts.bumpScale !== undefined ? opts.bumpScale : 1.2 },
     uBones: { value: opts.pose ? opts.pose.uniform : null },
   };
 
@@ -241,6 +243,7 @@ export function createNovaMaterial(opts = {}) {
         uniform vec3 uDissolveColor;
         uniform float uFlash; uniform float uEmitScale; uniform float uOpacity;
         uniform float uRim; uniform float uDissolve; uniform float uDetail;
+        uniform float uBump; uniform float uBumpScale;
         uniform sampler2D uNoise;`)
       // Writing into diffuseColor rather than gl_FragColor is the whole point:
       // everything downstream — shadows, IBL, the BRDF, fog, tone mapping —
@@ -261,11 +264,45 @@ export function createNovaMaterial(opts = {}) {
         float novaDxy = texture2D(uNoise, vNovaWorld.xy * 0.85).b;
         float novaDzy = texture2D(uNoise, vNovaWorld.zy * 0.85).r;
         float novaDet = mix(0.5, (novaDxz + novaDxy + novaDzy) / 3.0, uDetail);
+
+        // ---- procedural detail height, projected triplanar ----
+        // Geometry can only carry features bigger than an edge; everything
+        // below that has to come from the normal. This is the height field the
+        // shading normal is perturbed by, a few lines further down.
+        vec3 novaWN = normalize(cross(dFdx(vNovaWorld), dFdy(vNovaWorld)));
+        vec3 novaTri = abs(novaWN);
+        novaTri /= max(1e-4, novaTri.x + novaTri.y + novaTri.z);
+        vec2 novaSc = vec2(uBumpScale);
+        float novaH =
+            texture2D(uNoise, vNovaWorld.zy * novaSc).r * novaTri.x +
+            texture2D(uNoise, vNovaWorld.xz * novaSc).r * novaTri.y +
+            texture2D(uNoise, vNovaWorld.xy * novaSc).r * novaTri.z;
+        novaH += 0.34 * (
+            texture2D(uNoise, vNovaWorld.zy * novaSc * 2.4).g * novaTri.x +
+            texture2D(uNoise, vNovaWorld.xz * novaSc * 2.4).g * novaTri.y +
+            texture2D(uNoise, vNovaWorld.xy * novaSc * 2.4).g * novaTri.z);
         diffuseColor.rgb *= vNovaColor * uTint * (0.80 + novaDet * 0.42);
         diffuseColor.rgb = mix(diffuseColor.rgb, uFlashColor, uFlash);
         diffuseColor.a *= uOpacity;`)
       .replace('#include <roughnessmap_fragment>', `
         float roughnessFactor = roughness * (0.82 + novaDet * 0.36);`)
+      // Mikkelsen's derivative bump: the surface gradient of a height field,
+      // rebuilt from screen-space derivatives, so no tangents and no UVs are
+      // needed. This is what gives untextured rock a readable surface up close.
+      .replace('#include <normal_fragment_maps>', `
+        #include <normal_fragment_maps>
+        // A derivative bump has no mip chain, so at distance it turns into
+        // speckle. It has to fade out before it gets there.
+        float novaBump = uBump * (1.0 - smoothstep(16.0, 52.0, length(vViewPosition)));
+        if (novaBump > 0.001) {
+          vec3 novaSurf = -vViewPosition;
+          vec3 novaPx = dFdx(novaSurf), novaPy = dFdy(novaSurf);
+          vec3 novaR1 = cross(novaPy, normal);
+          vec3 novaR2 = cross(normal, novaPx);
+          float novaDt = dot(novaPx, novaR1);
+          vec3 novaGrad = sign(novaDt) * (dFdx(novaH) * novaR1 + dFdy(novaH) * novaR2);
+          normal = normalize(abs(novaDt) * normal - novaBump * novaGrad);
+        }`)
       .replace('#include <emissivemap_fragment>', `
         totalEmissiveRadiance += vNovaColor * vNovaEmit * uEmitScale;
         totalEmissiveRadiance += uDissolveColor * novaEdge * 3.0;
@@ -353,14 +390,18 @@ export function createFloorMaterial() {
 
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
-        varying vec3 vFloorWorld;`)
+        attribute vec3 aColor;
+        varying vec3 vFloorWorld;
+        varying vec3 vFloorTint;`)
       .replace('#include <begin_vertex>', `
         vec3 transformed = vec3(position);
+        vFloorTint = aColor;
         vFloorWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;`);
 
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
         varying vec3 vFloorWorld;
+        varying vec3 vFloorTint;
         uniform float uTime; uniform float uRadius; uniform float uThreat; uniform float uCoreGlow;
         uniform vec3 uBase; uniform vec3 uSeam; uniform vec3 uAccent; uniform vec3 uDanger;
         uniform vec4 uRipples[8];
@@ -396,12 +437,21 @@ export function createFloorMaterial() {
         float fdrift = texture2D(uNoise, fp * 0.012).b;
 
         // hairline splits in dried clay, roughly a hand's width apart
-        float fbig = 1.0 - smoothstep(0.0, 0.055, crackField(fp * 0.45));
-        float ffine = 1.0 - smoothstep(0.0, 0.085, crackField(fp * 1.35));
-        float fcrack = clamp(fbig * 0.85 + ffine * 0.5 * fdetail, 0.0, 1.0);
+        float fbig = 1.0 - smoothstep(0.0, 0.075, crackField(fp * 0.62));
+        float ffine = 1.0 - smoothstep(0.0, 0.095, crackField(fp * 1.9));
+        // Clay does not craze evenly over a whole basin — it splits where the
+        // silt lay thickest. An even crack field over the entire floor is the
+        // clearest tell that a texture is generated rather than observed.
+        float fpatch = smoothstep(0.30, 0.66, texture2D(uNoise, fp * 0.023).r);
+        float fcrack = clamp(fbig * 0.85 + ffine * 0.55 * fdetail, 0.0, 1.0) * fpatch;
 
-        vec3 falbedo = mix(uBase, uAccent, smoothstep(0.34, 0.82, fdrift));
-        falbedo = mix(falbedo, uSeam, smoothstep(0.62, 0.16, fdrift) * 0.45);
+        // The terrain mesh bakes the large-scale story into vertex colour —
+        // sand drifts, wash bottoms, the shadow under the canyon wall — because
+        // that is the scale a shader cannot see. Everything below is detail too
+        // fine to tessellate, applied as modulation on top of it.
+        vec3 fground = mix(uBase, uAccent, smoothstep(0.34, 0.82, fdrift));
+        vec3 falbedo = mix(fground, vFloorTint, 0.72);
+        falbedo = mix(falbedo, uSeam, smoothstep(0.62, 0.16, fdrift) * 0.35);
         falbedo *= 0.74 + fgrain * 0.34;
         falbedo = mix(falbedo, uSeam, fcrack * 0.46);
         falbedo = mix(falbedo, uDanger, uThreat * 0.16);
@@ -426,6 +476,20 @@ export function createFloorMaterial() {
       // cracks read as damp/rough, drifted sand as smoother
       .replace('#include <roughnessmap_fragment>', `
         float roughnessFactor = roughness * (0.86 + fcrack * 0.14) - fdrift * 0.10;`)
+      // The cracks are grooves, not a painted pattern: perturbing the shading
+      // normal by the same field is what makes them catch the low sun.
+      .replace('#include <normal_fragment_maps>', `
+        #include <normal_fragment_maps>
+        {
+          float fh = fgrain * 0.30 - fcrack * 0.75;
+          vec3 fsurf = -vViewPosition;
+          vec3 fpx = dFdx(fsurf), fpy = dFdy(fsurf);
+          vec3 fr1 = cross(fpy, normal);
+          vec3 fr2 = cross(normal, fpx);
+          float fdt = dot(fpx, fr1);
+          vec3 fgrad = sign(fdt) * (dFdx(fh) * fr1 + dFdy(fh) * fr2);
+          normal = normalize(abs(fdt) * normal - 0.11 * fdetail * fgrad);
+        }`)
       .replace('#include <emissivemap_fragment>', `
         totalEmissiveRadiance += uAccent * uCoreGlow * 0.04 * exp(-frad * 0.09);
         // the cracks self-shadow: cheap contact darkening the shadow map is

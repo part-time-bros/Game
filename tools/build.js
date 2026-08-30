@@ -25,6 +25,7 @@ const ORDER = [
   'src/render/rig.js',
   'src/render/materials.js',
   'src/render/models.js',
+  'src/render/terrain.js',
   'src/render/rig-models.js',
   'src/render/renderer.js',
   'src/render/camera.js',

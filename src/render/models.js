@@ -150,11 +150,10 @@ const ico = (d) => prim('ico' + d, () => new THREE.IcosahedronGeometry(0.5, d));
 const oct = (d) => prim('oct' + d, () => new THREE.OctahedronGeometry(0.5, d));
 const tet = () => prim('tet', () => new THREE.TetrahedronGeometry(0.5));
 const tor = (r, t, rs, ts) => prim(`tor${r}_${t}_${rs}_${ts}`, () => new THREE.TorusGeometry(r, t, rs, ts));
-const tap = (rt, rb, seg) => prim(`tap${rt}_${rb}_${seg}`, () => new THREE.CylinderGeometry(rt, rb, 1, seg, 1));
 
 /** Shared primitive factory, also used by the rigged models in rig-models.js. */
 export const PRIM = {
-  box, cyl, cone, sph, ico, oct, tet, tor, tap,
+  box, cyl, cone, sph, ico, oct, tet, tor,
   wedge: (w, h, l, n) => wedgeGeometry(w, h, l, n),
   spike: (len, base, sides) => spikeGeometry(len, base, sides),
 };
@@ -486,83 +485,6 @@ export function buildMaw() {
 // ======================================================================
 //  WORLD PROPS
 // ======================================================================
-/**
- * Rock spire. Layered strata read as sedimentary rock: each slab is a slightly
- * different earth tone, and the taper is irregular so no two read the same.
- */
-export function buildRockSpire(seed = 0) {
-  const b = new MeshBuilder();
-  const rnd = (n) => (((Math.sin(seed * 12.9898 + n * 78.233) * 43758.5453) % 1) + 1) % 1;
-  const h = 6.5 + rnd(0) * 7.0;
-  const layers = 5 + Math.floor(rnd(1) * 3);
-  const tones = [PALETTE.rockRed, PALETTE.rockDark, PALETTE.strata, PALETTE.rockLite, PALETTE.clay];
-  let y = 0;
-  let r = 2.4 + rnd(2) * 1.1;
-  for (let i = 0; i < layers; i++) {
-    const lh = (h / layers) * (0.7 + rnd(i + 3) * 0.7);
-    const rTop = r * (0.68 + rnd(i + 9) * 0.24);
-    b.add(tap(rTop, r, 6 + (i % 2)), {
-      pos: [rnd(i + 20) * 0.5 - 0.25, y + lh / 2, rnd(i + 30) * 0.5 - 0.25],
-      rot: [0, rnd(i + 40) * 1.2, 0],
-      scale: [2, lh, 2],
-      color: tones[i % tones.length],
-    });
-    y += lh * 0.94;
-    r = rTop;
-  }
-  // rubble at the base, so the spire sits in the ground instead of on it
-  for (let i = 0; i < 5; i++) {
-    const a = rnd(i + 50) * TAU;
-    const rr = 2.0 + rnd(i + 60) * 1.6;
-    b.add(ico(0), {
-      pos: [Math.cos(a) * rr, 0.25 + rnd(i + 70) * 0.4, Math.sin(a) * rr],
-      rot: [rnd(i + 80) * 3, rnd(i + 85) * 3, rnd(i + 90) * 3],
-      scale: 0.7 + rnd(i + 95) * 1.1,
-      color: i % 2 ? PALETTE.rockDark : PALETTE.strata,
-    });
-  }
-  return { geometry: b.build('rock-spire'), radius: 2.6, height: h };
-}
-
-/** Bare desert tree — trunk with a few dead limbs. Silhouette, not foliage. */
-export function buildDeadTree(seed = 0) {
-  const b = new MeshBuilder();
-  const rnd = (n) => (((Math.sin(seed * 4.1237 + n * 91.77) * 21374.9871) % 1) + 1) % 1;
-  const h = 4.4 + rnd(0) * 2.2;
-  b.add(tap(0.16, 0.42, 5), { pos: [0, h / 2, 0], scale: [2, h, 2], color: PALETTE.timberDark });
-  for (let i = 0; i < 5; i++) {
-    const a = rnd(i) * TAU;
-    const y = h * (0.45 + rnd(i + 5) * 0.5);
-    const len = 1.2 + rnd(i + 10) * 1.5;
-    b.add(tap(0.05, 0.16, 4), {
-      pos: [Math.cos(a) * len * 0.4, y, Math.sin(a) * len * 0.4],
-      rot: [Math.cos(a) * 0.9, -a, Math.sin(a) * 0.9],
-      scale: [2, len, 2],
-      color: PALETTE.timber,
-    });
-  }
-  return { geometry: b.build('dead-tree'), radius: 0.6, height: h };
-}
-
-/** Saguaro. Reads as "desert" from a single silhouette faster than anything else. */
-export function buildCactus(seed = 0) {
-  const b = new MeshBuilder();
-  const rnd = (n) => (((Math.sin(seed * 7.77 + n * 33.13) * 9812.331) % 1) + 1) % 1;
-  const h = 3.0 + rnd(0) * 2.0;
-  b.add(cyl(8), { pos: [0, h / 2, 0], scale: [0.62, h, 0.62], color: PALETTE.scrub });
-  b.add(sph(8, 6), { pos: [0, h, 0], scale: 0.62, color: PALETTE.scrub, flat: false });
-  const arms = 1 + Math.floor(rnd(1) * 2);
-  for (let i = 0; i < arms; i++) {
-    const sx = i === 0 ? 1 : -1;
-    const y = h * (0.42 + rnd(i + 2) * 0.22);
-    const al = 0.9 + rnd(i + 4) * 0.5;
-    b.add(cyl(6), { pos: [sx * 0.5, y, 0], rot: [0, 0, -sx * 1.35], scale: [0.34, al, 0.34], color: PALETTE.sage });
-    b.add(cyl(6), { pos: [sx * (0.42 + al * 0.5), y + al * 0.55, 0], scale: [0.34, al * 0.9, 0.34], color: PALETTE.sage });
-    b.add(sph(8, 6), { pos: [sx * (0.42 + al * 0.5), y + al, 0], scale: 0.34, color: PALETTE.sage, flat: false });
-  }
-  return { geometry: b.build('cactus'), radius: 0.7, height: h };
-}
-
 /**
  * The landmark at the centre of the arena — what the stabilizer used to be.
  * Timber water tower with a windmill vane, so it has something that moves.

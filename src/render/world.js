@@ -7,7 +7,8 @@
 import { TAU, clamp01, lerp, RNG } from '../core/util.js';
 import { createFloorMaterial, createSkyMaterial, createNovaMaterial } from './materials.js';
 import { noiseTexture, skyTexture } from './textures.js';
-import { MeshBuilder, PALETTE, buildRockSpire, buildDeadTree, buildCactus, buildWaterTower } from './models.js';
+import { buildWaterTower } from './models.js';
+import { buildRock, buildGround, buildCanyon, buildMesaBelt, buildBranchTree, buildSaguaro, buildScrub, buildPebble, mergeGeometries } from './terrain.js';
 
 export const ARENA_RADIUS = 46;
 
@@ -53,7 +54,9 @@ export class World {
     // flat when the tier drops and IBL is off.
     // Deliberately weak. Ambient is what kills contrast: with the environment
     // map carrying the sky, this only needs to stop shadowed sides going black.
-    this.bounce = new THREE.HemisphereLight(0x9fb4d6, 0x8a6242, 0.18);
+    // Dust-hazed golden hour, not a clear blue day: a blue sky term is what
+    // was tinting the ground violet everywhere the sun did not reach.
+    this.bounce = new THREE.HemisphereLight(0xc4b39c, 0x7a5537, 0.20);
     scene.add(this.bounce);
 
     // Distance haze. The materials are three's standard now, so fog has to be
@@ -61,19 +64,22 @@ export class World {
     this.fog = new THREE.Fog(0x8a6a4c, 105, 330);
     scene.fog = this.fog;
 
-    // ---------- deck ----------
+    // ---------- ground ----------
+    // A displaced landform, not a disc. The mesh is authored in world XZ so it
+    // needs no rotation; rings are dense where the camera lives and coarsen out
+    // to the canyon foot, and the vertex colours carry the large-scale tone
+    // that the floor shader then details.
     this.floorMat = createFloorMaterial();
     this.floorMat.uniforms.uRadius.value = this.radius;
-    this.floor = new THREE.Mesh(new THREE.CircleGeometry(this.radius + 1.2, 128), this.floorMat);
-    this.floor.rotation.x = -Math.PI / 2;
+    this.floor = new THREE.Mesh(buildGround(this.radius, 150), this.floorMat);
     this.floor.receiveShadow = true;
     scene.add(this.floor);
 
     // ---------- canyon rim ----------
     // Rock instead of an energy fence: a boundary you can read from any angle
     // and which does not glow. Merged to one draw call.
-    this.rimMat = createNovaMaterial({ rim: 0.30, spec: 0.06, rimColor: 0xffb877 });
-    this.rim = new THREE.Mesh(this._buildRim(), this.rimMat);
+    this.rimMat = createNovaMaterial({ rim: 0.30, spec: 0.05, rimColor: 0xffb877, bump: 0.24, bumpScale: 0.085 });
+    this.rim = new THREE.Mesh(buildCanyon(this.radius, 31337), this.rimMat);
     this.rim.frustumCulled = false;
     this.rim.castShadow = true;
     this.rim.receiveShadow = true;
@@ -81,7 +87,7 @@ export class World {
 
     // ---------- water tower at the centre ----------
     const tower = buildWaterTower();
-    this.towerMat = createNovaMaterial({ rim: 0.35, spec: 0.14, rimColor: 0xffc98a });
+    this.towerMat = createNovaMaterial({ rim: 0.30, spec: 0.10, rimColor: 0xffc98a, bump: 0.10, bumpScale: 2.6 });
     this.stabGroup = new THREE.Group();
     this.towerFrame = new THREE.Mesh(tower.frame, this.towerMat);
     this.towerTank = new THREE.Mesh(tower.tank, this.towerMat);
@@ -94,7 +100,7 @@ export class World {
     this._stabGeos = [tower.frame, tower.tank, tower.vane];
 
     // ---------- cover: spires, dead trees, cactus ----------
-    this.pillarMat = createNovaMaterial({ rim: 0.28, spec: 0.05, rimColor: 0xffb877 });
+    this.pillarMat = createNovaMaterial({ rim: 0.28, spec: 0.05, rimColor: 0xffb877, bump: 0.22, bumpScale: 0.5 });
     this.pillars = [];
     const layout = [
       [0.30, 24, 'spire'], [1.35, 30, 'spire'], [2.35, 22, 'tree'], [3.35, 31, 'spire'],
@@ -102,9 +108,9 @@ export class World {
       [4.95, 38, 'spire'], [1.90, 15, 'cactus'], [3.90, 17, 'tree'], [5.90, 36, 'cactus'],
     ];
     const kinds = {
-      spire: [buildRockSpire(0), buildRockSpire(1), buildRockSpire(2)],
-      tree: [buildDeadTree(0), buildDeadTree(1)],
-      cactus: [buildCactus(0), buildCactus(1)],
+      spire: [this._spire(0), this._spire(1), this._spire(2)],
+      tree: [buildBranchTree(0), buildBranchTree(1)],
+      cactus: [buildSaguaro(0), buildSaguaro(1)],
     };
     this._pillarGeos = [];
     for (const k in kinds) for (const g of kinds[k]) this._pillarGeos.push(g.geometry);
@@ -127,9 +133,15 @@ export class World {
     // the tower's legs are solid
     this.obstacles.push({ x: 0, z: 0, r: 4.4, height: 7, core: true });
 
-    // ---------- parallax debris islands ----------
+    // ---------- distant mesas ----------
     this.islands = this._buildIslands();
     scene.add(this.islands);
+
+    // ---------- scatter: loose stone and dry brush ----------
+    // Density is what separates a game arena from an empty plane, and it has to
+    // be free: two InstancedMeshes carry ~250 objects for two draw calls.
+    this.scatter = this._buildScatter();
+    for (const m of this.scatter) scene.add(m);
 
     // ---------- ground mist ----------
     // Two slow-scrolling noise layers just above the deck. Cheap, but it gives
@@ -143,84 +155,74 @@ export class World {
   }
 
   /**
-   * The canyon that rings the arena. Chunky rock blocks at varied height and
-   * radius, plus a low apron of scree so the ground meets the wall instead of
-   * ending at a line. One merged geometry, one draw call.
+   * A rock spire: one eroded landform, plus a couple of fallen blocks at its
+   * foot so it sits in the ground rather than on it.
    */
-  _buildRim() {
-    const b = new MeshBuilder();
-    const R = this.radius;
-    const rng = new RNG(31337);
-    const tones = [PALETTE.rockRed, PALETTE.rockDark, PALETTE.strata, PALETTE.clay, PALETTE.rockLite];
-
-    // Per-block value jitter. Without it the wall reads as a fence of identical
-    // flat-shaded boxes; rock is the same hue at a dozen different values.
-    const tint = (hex, k) => {
-      const r = Math.min(255, Math.round(((hex >> 16) & 255) * k));
-      const g = Math.min(255, Math.round(((hex >> 8) & 255) * k));
-      const b = Math.min(255, Math.round((hex & 255) * k));
-      return (r << 16) | (g << 8) | b;
-    };
-
-    const blocks = 64;
-    for (let i = 0; i < blocks; i++) {
-      const a = (i / blocks) * TAU;
-      const wob = rng.range(-2.4, 2.6);
-      const h = rng.range(11, 30);
-      const rr = R + 3.0 + wob;
-      // stack two or three slabs so the wall has a stepped, eroded profile
-      let y = -1.5;
-      const slabs = 2 + Math.floor(rng.next() * 2);
-      for (let k = 0; k < slabs; k++) {
-        const sh = (h / slabs) * rng.range(0.75, 1.25);
-        b.add(new THREE.CylinderGeometry(0.5, 0.62, 1, 5), {
-          pos: [Math.cos(a) * rr, y + sh / 2, Math.sin(a) * rr],
-          rot: [rng.range(-0.06, 0.06), a + rng.range(-0.5, 0.5), rng.range(-0.05, 0.05)],
-          scale: [rng.range(8, 15), sh, rng.range(7, 12)],
-          color: tint(tones[(i + k) % tones.length], rng.range(0.42, 1.02)),
-        });
-        y += sh * 0.86;
-      }
+  _spire(seed) {
+    const h = 7.0 + (seed % 3) * 2.6;
+    const main = buildRock(seed * 131 + 17, { rough: 0.46, tall: 1.0, wide: 0.72 });
+    main.scale(2.7, h * 0.62, 2.7);
+    main.translate(0, h * 0.42, 0);
+    const parts = [main];
+    for (let i = 0; i < 3; i++) {
+      const a = (i / 3) * TAU + seed;
+      const r = 2.2 + (i * 0.7);
+      const g = buildRock(seed * 71 + i * 13, { detail: 2, rough: 0.55, tall: 0.7 });
+      const sc = 0.8 + (i % 2) * 0.55;
+      g.scale(sc * 1.3, sc * 0.8, sc * 1.3);
+      g.rotateY(a * 2.1);
+      g.translate(Math.cos(a) * r, 0.1, Math.sin(a) * r);
+      parts.push(g);
     }
-    // scree apron
-    for (let i = 0; i < 90; i++) {
-      const a = rng.next() * TAU;
-      const rr = R - rng.range(0, 5.5);
-      b.add(new THREE.IcosahedronGeometry(0.5, 0), {
-        pos: [Math.cos(a) * rr, rng.range(0.1, 0.6), Math.sin(a) * rr],
-        rot: [rng.next() * TAU, rng.next() * TAU, rng.next() * TAU],
-        scale: rng.range(0.5, 2.4),
-        color: tint(rng.next() < 0.5 ? PALETTE.rockDark : PALETTE.strata, rng.range(0.55, 1.0)),
-      });
-    }
-    return b.build('canyon-rim');
+    return { geometry: mergeGeometries(parts), radius: 2.6, height: h };
   }
 
-  /** Mesas out past the canyon. Flat-topped, hazed, purely for the horizon. */
-  _buildIslands() {
-    const b = new MeshBuilder();
-    const rng = this.rng;
-    for (let i = 0; i < 26; i++) {
-      const a = rng.next() * TAU;
-      const r = rng.range(120, 320);
-      const h = rng.range(14, 62);
-      const w = rng.range(18, 62);
-      b.add(new THREE.CylinderGeometry(0.44, 0.5, 1, 6), {
-        pos: [Math.cos(a) * r, h / 2 - 6, Math.sin(a) * r],
-        rot: [0, rng.next() * TAU, 0],
-        scale: [w, h, w * rng.range(0.6, 1.3)],
-        color: i % 3 === 0 ? PALETTE.rockDark : PALETTE.strata,
-      });
-      // a shoulder of talus so they do not read as cylinders
-      b.add(new THREE.CylinderGeometry(0.5, 0.72, 1, 6), {
-        pos: [Math.cos(a) * r, -4, Math.sin(a) * r],
-        rot: [0, rng.next() * TAU, 0],
-        scale: [w * 1.35, h * 0.24, w * 1.2],
-        color: PALETTE.rockDark,
-      });
+  /**
+   * Loose stone and dry brush across the flats. Instanced, so the whole layer
+   * costs two draw calls no matter how many objects are in it.
+   */
+  _buildScatter() {
+    const rng = new RNG(90210);
+    const out = [];
+    const specs = [
+      { geo: buildPebble(3), count: 150, mat: this.pillarMat, lo: 0.16, hi: 0.72, edge: true },
+      { geo: buildScrub(11), count: 110, mat: createNovaMaterial({ rim: 0.2, spec: 0.04, rimColor: 0xffd0a0 }), lo: 0.7, hi: 1.5, edge: false },
+    ];
+    this._scatterGeos = [];
+    this._scatterMats = [];
+    const m4 = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const e = new THREE.Euler();
+    const v = new THREE.Vector3();
+    const sv = new THREE.Vector3();
+    for (const spec of specs) {
+      const mesh = new THREE.InstancedMesh(spec.geo, spec.mat, spec.count);
+      for (let i = 0; i < spec.count; i++) {
+        const a = rng.next() * TAU;
+        // biased outward: the middle of the arena has to stay clear to fight in
+        const r = lerp(6, this.radius + 0.5, Math.pow(rng.next(), 0.55));
+        const s = rng.range(spec.lo, spec.hi);
+        v.set(Math.cos(a) * r, spec.edge ? rng.range(-0.1, 0.15) : -0.06, Math.sin(a) * r);
+        e.set(spec.edge ? rng.next() * TAU : 0, rng.next() * TAU, spec.edge ? rng.range(-0.4, 0.4) : 0);
+        q.setFromEuler(e);
+        sv.set(s * rng.range(0.8, 1.3), s * rng.range(0.7, 1.2), s * rng.range(0.8, 1.3));
+        mesh.setMatrixAt(i, m4.compose(v, q, sv));
+      }
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      mesh.frustumCulled = false;
+      out.push(mesh);
+      this._scatterGeos.push(spec.geo);
+      if (spec.mat !== this.pillarMat) this._scatterMats.push(spec.mat);
     }
+    return out;
+  }
+
+  /** Mesas out past the canyon. Eroded, hazed, purely for the horizon. */
+  _buildIslands() {
     // fog eats most of them, which is the point: depth without detail
-    const mesh = new THREE.Mesh(b.build('mesas'), createNovaMaterial({ rim: 0.18, spec: 0.02, fog: 1.0, rimColor: 0xffb877 }));
+    const mesh = new THREE.Mesh(buildMesaBelt(21), createNovaMaterial({ rim: 0.18, spec: 0.02, fog: 1.0, rimColor: 0xffb877, bump: 0.0 }));
     mesh.frustumCulled = false;
     this._islandMat = mesh.material;
     return mesh;
@@ -407,6 +409,9 @@ export class World {
     this.rim.geometry.dispose(); this.rimMat.dispose();
     this._stabGeos.forEach((g) => g.dispose());
     this._pillarGeos.forEach((g) => g.dispose());
+    this._scatterGeos.forEach((g) => g.dispose());
+    this._scatterMats.forEach((m) => m.dispose());
+    this.scatter.forEach((m) => m.dispose());
     this.towerMat.dispose(); this.pillarMat.dispose();
     this.islands.geometry.dispose(); this._islandMat.dispose();
     this.motes.geometry.dispose(); this._moteMat.dispose();

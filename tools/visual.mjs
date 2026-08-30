@@ -177,6 +177,30 @@ const SCENES = {
     N.setCamera({ x: 0, y: 8, z: 0, tx: 90, ty: 34, tz: 20 });
     N.step(1/60,2);
   `,
+  arena: `
+    const g = N.game;
+    N.start('striker','pilot','campaign',1); N.step(1/60,40);
+    g.waves.clear(); g.enemies.clear(); g.timers.length = 0;
+    g.player.position.set(0,1.05,0);
+    N.setCamera({ x: 0, y: 26, z: 62, tx: 0, ty: 6, tz: 0 });
+    N.step(1/60,2);
+  `,
+  wall: `
+    const g = N.game;
+    N.start('striker','pilot','campaign',1); N.step(1/60,40);
+    g.waves.clear(); g.enemies.clear(); g.timers.length = 0;
+    g.player.position.set(0,1.05,0);
+    N.setCamera({ x: 0, y: 5, z: 12, tx: 0, ty: 16, tz: -52 });
+    N.step(1/60,2);
+  `,
+  rocks: `
+    const g = N.game;
+    N.start('striker','pilot','campaign',1); N.step(1/60,40);
+    g.waves.clear(); g.enemies.clear(); g.timers.length = 0;
+    g.player.position.set(0,1.05,0);
+    N.setCamera({ x: 26, y: 4.2, z: 14, tx: 4, ty: 5, tz: -6 });
+    N.step(1/60,2);
+  `,
   refit: `
     N.setCamera(null);
     N.start('striker','pilot','campaign',3); N.step(1/60,90);

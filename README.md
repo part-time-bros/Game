@@ -113,7 +113,9 @@ Phantom (three dashes, glass) — unlocked by reaching waves 5 and 10.
 | Meshes | `MeshBuilder` composes primitives into one merged non-indexed geometry per model, carrying per-vertex colour and emissive attributes. One draw call per entity. |
 | Rigs | `RigBuilder` does the same but assigns each part to a bone and emits an `aBone` attribute, so an articulated model is still one draw call. |
 | Animation | Clips are authored in code as position/rotation/scale tracks, compiled against a skeleton, then crossfaded by a small animator with procedural overlays on top. |
-| Deck | A two-tier hex lattice evaluated in the fragment shader, with travelling scan pulses and eight live impact ripples. |
+| Terrain | Landforms, not stacked primitives: a dense icosphere or polar grid displaced by multi-octave value noise, sliced against fracture planes for an angular silhouette, stepped along bedding planes, then shaded with strata and baked cavity occlusion in vertex colour. |
+| Surface detail | Below the size of a triangle, relief comes from the normal: a triplanar height field turned into a shading normal by Mikkelsen's derivative bump, so untextured rock still reads up close with no UVs and no tangents. |
+| Ground | Displaced polar mesh under a fragment shader that adds Worley F2-F1 crazing in dried clay, patchy so it never covers the basin evenly, plus eight live impact ripples. |
 | Sky | An equirectangular nebula painted once into a canvas: fbm cloud layers sampled on a circle (so it tiles), three star populations, cross flares. |
 | Particles | Canvas-painted glow/smoke/shard sprites over a data-oriented `Points` system — one draw call per blend mode. |
 | Sound | WebAudio synthesis: oscillators, filtered noise bursts and a procedural convolution reverb. Thirty-six distinct effects. |
@@ -141,6 +143,7 @@ src/
     materials.js      the shader family (surface, floor, energy, particles…)
     rig.js            rigid-bind skinning, clips, crossfading animator
     models.js         static meshes (props, projectiles, pickups)
+    terrain.js        landform geometry: displaced rock, ground, canyon
     rig-models.js     the animated cast: ships, six archetypes, three bosses
     textures.js       every texture in the game
     world.js          arena assembly
