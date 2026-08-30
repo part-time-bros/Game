@@ -8,7 +8,7 @@ import { TAU, clamp01, lerp, RNG } from '../core/util.js';
 import { createFloorMaterial, createSkyMaterial, createNovaMaterial } from './materials.js';
 import { noiseTexture, skyTexture } from './textures.js';
 import { buildWaterTower } from './models.js';
-import { buildRock, buildGround, buildCanyon, buildMesaBelt, buildBranchTree, buildSaguaro, buildScrub, buildPebble, mergeGeometries } from './terrain.js';
+import { buildRock, buildGround, buildCanyon, buildMesaBelt, buildBranchTree, buildSaguaro, buildScrub, buildPebble, mergeGeometries, seat } from './terrain.js';
 
 export const ARENA_RADIUS = 46;
 
@@ -160,18 +160,22 @@ export class World {
    */
   _spire(seed) {
     const h = 7.0 + (seed % 3) * 2.6;
-    const main = buildRock(seed * 131 + 17, { rough: 0.46, tall: 1.0, wide: 0.72 });
-    main.scale(2.7, h * 0.62, 2.7);
-    main.translate(0, h * 0.42, 0);
+    // buildRock already returns a body with a flat base near y=0, so it is
+    // seated by measuring it (see seat) rather than lifted by half its height.
+    // The unit body spans roughly [-0.12, 1.0], so the vertical scale is
+    // h / 1.12 to make the spire actually h tall — the number the obstacle
+    // record and the collision height are quoted in.
+    const main = seat(buildRock(seed * 131 + 17, { rough: 0.46, tall: 1.0, wide: 0.72 })
+      .scale(2.9, h / 1.12, 2.9), 0.55);
     const parts = [main];
     for (let i = 0; i < 3; i++) {
       const a = (i / 3) * TAU + seed;
       const r = 2.2 + (i * 0.7);
-      const g = buildRock(seed * 71 + i * 13, { detail: 2, rough: 0.55, tall: 0.7 });
       const sc = 0.8 + (i % 2) * 0.55;
-      g.scale(sc * 1.3, sc * 0.8, sc * 1.3);
-      g.rotateY(a * 2.1);
-      g.translate(Math.cos(a) * r, 0.1, Math.sin(a) * r);
+      const g = seat(buildRock(seed * 71 + i * 13, { detail: 2, rough: 0.55, tall: 0.7 })
+        .scale(sc * 1.3, sc * 0.8, sc * 1.3)
+        .rotateY(a * 2.1), 0.35 * sc);
+      g.translate(Math.cos(a) * r, 0, Math.sin(a) * r);
       parts.push(g);
     }
     return { geometry: mergeGeometries(parts), radius: 2.6, height: h };
@@ -202,7 +206,9 @@ export class World {
         // biased outward: the middle of the arena has to stay clear to fight in
         const r = lerp(6, this.radius + 0.5, Math.pow(rng.next(), 0.55));
         const s = rng.range(spec.lo, spec.hi);
-        v.set(Math.cos(a) * r, spec.edge ? rng.range(-0.1, 0.15) : -0.06, Math.sin(a) * r);
+        // A tumbled pebble has no "down" face, so it is sunk rather than seated:
+        // half-buried always reads as resting, at any orientation.
+        v.set(Math.cos(a) * r, spec.edge ? -s * rng.range(0.25, 0.5) : -0.06, Math.sin(a) * r);
         e.set(spec.edge ? rng.next() * TAU : 0, rng.next() * TAU, spec.edge ? rng.range(-0.4, 0.4) : 0);
         q.setFromEuler(e);
         sv.set(s * rng.range(0.8, 1.3), s * rng.range(0.7, 1.2), s * rng.range(0.8, 1.3));

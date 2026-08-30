@@ -281,6 +281,21 @@ export class Input {
       if (this._edgeLatch.pause) pause = true;
     }
 
+    // A scripted *stick* aim. `override.aim` further down is already world
+    // space; this one is a raw thumbstick reading, so it goes through the
+    // camera-relative rotation below — the same path a real stick takes, and
+    // the only path that can reproduce a rig/aim feedback loop.
+    const ov = this.override;
+    if (ov && ov.aimStick) {
+      const al = lengthXZ(ov.aimStick.x, ov.aimStick.z);
+      if (al > 0.001) {
+        this.aim.mode = 'stick';
+        this.aim.active = true;
+        this.aim.rawX = ov.aimStick.x / al;
+        this.aim.rawZ = ov.aimStick.z / al;
+      }
+    }
+
     const len = lengthXZ(mx, mz);
     if (len > 1) { mx /= len; mz /= len; }
 

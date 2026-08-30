@@ -348,15 +348,17 @@ export function buildGround(playRadius = 46, outerRadius = 150) {
   const dirt = new THREE.Color(PALETTE.dirt);
 
   const heightAt = (x, z, rad) => {
-    // inside the arena: barely anything, so gameplay stays flat
+    // Inside the arena the surface has to stay just under y=0: entities and
+    // props are placed on that plane, so ground that rises above it clips them
+    // and ground that dips far below it leaves them hanging in the air.
     const inner = fbm3(x * 0.035, 0.5, z * 0.035, 3) - 0.5;
-    let h = inner * 0.45;
+    let h = -0.07 + inner * 0.18;
     // beyond the play area the ground lifts into the canyon's base
     const out = clamp01((rad - playRadius * 0.92) / 26);
     h += out * out * 9.5 * (0.55 + fbm3(x * 0.02, 3.1, z * 0.02, 3) * 0.9);
-    // dry washes cut across the flats
+    // dry washes cut across the flats, shallow enough to keep contact
     const wash = ridge3(x * 0.017, 7.7, z * 0.017, 3);
-    h -= clamp01(1 - out) * wash * 0.5;
+    h -= clamp01(1 - out) * wash * 0.16;
     return h;
   };
 
@@ -546,6 +548,23 @@ export function buildMesaBelt(seed = 21) {
   return merged;
 }
 
+/**
+ * Sit a prop on the ground.
+ *
+ * Every builder here returns a body whose base lands wherever the noise left
+ * it, so guessing an offset from the intended height floats some props and
+ * buries others. Measuring the geometry instead is exact: translate so the
+ * lowest vertex sits `bury` below y=0, which is where the simulation puts the
+ * ground.
+ */
+export function seat(geo, bury = 0.3) {
+  geo.computeBoundingBox();
+  geo.translate(0, -geo.boundingBox.min.y - bury, 0);
+  geo.computeBoundingBox();
+  geo.computeBoundingSphere();
+  return geo;
+}
+
 /** Minimal merge — three's BufferGeometryUtils is an addon, absent from UMD. */
 export function mergeGeometries(list) {
   let vCount = 0, iCount = 0;
@@ -629,7 +648,7 @@ export function buildBranchTree(seed = 0) {
   flare.translate(0, -0.05, 0);
   parts.push(flare);
 
-  const geo = mergeGeometries(parts);
+  const geo = seat(mergeGeometries(parts), 0.25);
   geo.name = 'dead-tree';
   return { geometry: geo, radius: 0.7, height: h };
 }
@@ -670,7 +689,7 @@ export function buildSaguaro(seed = 0) {
       new THREE.Vector3(Math.cos(a), 0.22, Math.sin(a)), 1.1 + rnd() * 0.9, 0.26);
   }
   for (const g of parts) paint(g, PALETTE.scrub, { tip: PALETTE.sage, floor: 0.62, grain: 0.14 });
-  const geo = mergeGeometries(parts);
+  const geo = seat(mergeGeometries(parts), 0.2);
   geo.name = 'saguaro';
   return { geometry: geo, radius: 0.8, height: h };
 }
@@ -698,7 +717,7 @@ export function buildScrub(seed = 0) {
     parts.push(sweep(spine, radii, 4));
   }
   for (const g of parts) paint(g, PALETTE.sage, { tip: PALETTE.cloth, floor: 0.55, grain: 0.3 });
-  const geo = mergeGeometries(parts);
+  const geo = seat(mergeGeometries(parts), 0.12);
   geo.name = 'scrub';
   return geo;
 }

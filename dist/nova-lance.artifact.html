@@ -1934,6 +1934,21 @@ class Input {
       if (this._edgeLatch.pause) pause = true;
     }
 
+    // A scripted *stick* aim. `override.aim` further down is already world
+    // space; this one is a raw thumbstick reading, so it goes through the
+    // camera-relative rotation below — the same path a real stick takes, and
+    // the only path that can reproduce a rig/aim feedback loop.
+    const ov = this.override;
+    if (ov && ov.aimStick) {
+      const al = lengthXZ(ov.aimStick.x, ov.aimStick.z);
+      if (al > 0.001) {
+        this.aim.mode = 'stick';
+        this.aim.active = true;
+        this.aim.rawX = ov.aimStick.x / al;
+        this.aim.rawZ = ov.aimStick.z / al;
+      }
+    }
+
     const len = lengthXZ(mx, mz);
     if (len > 1) { mx /= len; mz /= len; }
 
@@ -4341,15 +4356,17 @@ function buildGround(playRadius = 46, outerRadius = 150) {
   const dirt = new THREE.Color(PALETTE.dirt);
 
   const heightAt = (x, z, rad) => {
-    // inside the arena: barely anything, so gameplay stays flat
+    // Inside the arena the surface has to stay just under y=0: entities and
+    // props are placed on that plane, so ground that rises above it clips them
+    // and ground that dips far below it leaves them hanging in the air.
     const inner = fbm3(x * 0.035, 0.5, z * 0.035, 3) - 0.5;
-    let h = inner * 0.45;
+    let h = -0.07 + inner * 0.18;
     // beyond the play area the ground lifts into the canyon's base
     const out = clamp01((rad - playRadius * 0.92) / 26);
     h += out * out * 9.5 * (0.55 + fbm3(x * 0.02, 3.1, z * 0.02, 3) * 0.9);
-    // dry washes cut across the flats
+    // dry washes cut across the flats, shallow enough to keep contact
     const wash = ridge3(x * 0.017, 7.7, z * 0.017, 3);
-    h -= clamp01(1 - out) * wash * 0.5;
+    h -= clamp01(1 - out) * wash * 0.16;
     return h;
   };
 
@@ -4539,6 +4556,23 @@ function buildMesaBelt(seed = 21) {
   return merged;
 }
 
+/**
+ * Sit a prop on the ground.
+ *
+ * Every builder here returns a body whose base lands wherever the noise left
+ * it, so guessing an offset from the intended height floats some props and
+ * buries others. Measuring the geometry instead is exact: translate so the
+ * lowest vertex sits `bury` below y=0, which is where the simulation puts the
+ * ground.
+ */
+function seat(geo, bury = 0.3) {
+  geo.computeBoundingBox();
+  geo.translate(0, -geo.boundingBox.min.y - bury, 0);
+  geo.computeBoundingBox();
+  geo.computeBoundingSphere();
+  return geo;
+}
+
 /** Minimal merge — three's BufferGeometryUtils is an addon, absent from UMD. */
 function mergeGeometries(list) {
   let vCount = 0, iCount = 0;
@@ -4622,7 +4656,7 @@ function buildBranchTree(seed = 0) {
   flare.translate(0, -0.05, 0);
   parts.push(flare);
 
-  const geo = mergeGeometries(parts);
+  const geo = seat(mergeGeometries(parts), 0.25);
   geo.name = 'dead-tree';
   return { geometry: geo, radius: 0.7, height: h };
 }
@@ -4663,7 +4697,7 @@ function buildSaguaro(seed = 0) {
       new THREE.Vector3(Math.cos(a), 0.22, Math.sin(a)), 1.1 + rnd() * 0.9, 0.26);
   }
   for (const g of parts) paint(g, PALETTE.scrub, { tip: PALETTE.sage, floor: 0.62, grain: 0.14 });
-  const geo = mergeGeometries(parts);
+  const geo = seat(mergeGeometries(parts), 0.2);
   geo.name = 'saguaro';
   return { geometry: geo, radius: 0.8, height: h };
 }
@@ -4691,7 +4725,7 @@ function buildScrub(seed = 0) {
     parts.push(sweep(spine, radii, 4));
   }
   for (const g of parts) paint(g, PALETTE.sage, { tip: PALETTE.cloth, floor: 0.55, grain: 0.3 });
-  const geo = mergeGeometries(parts);
+  const geo = seat(mergeGeometries(parts), 0.12);
   geo.name = 'scrub';
   return geo;
 }
@@ -6154,6 +6188,21 @@ const MAX_AIM = 120;        // a grazing ray must not fling the reticle to infin
 const WORLD_LOCKED = Math.PI;   // rig azimuth that puts the camera due south
 
 /**
+ * How far a turning rig may lean off world north.
+ *
+ * It is a clamp against an absolute reference, not a chase, and that is the
+ * whole point. The aim stick is expressed relative to the rig, so a rig that
+ * damps toward the ship's yaw closes a loop: the stick's world direction is
+ * rig + stickAngle, the ship turns to that, the rig follows the ship, and next
+ * frame the same held stick points somewhere new again. For any stick angle
+ * off screen-up that system has no fixed point and the ship spins forever —
+ * 5.4 rotations per 10 seconds at 45 degrees. Recomputing the lean from world
+ * north each frame removes the integration, so the offset saturates here and
+ * stops.
+ */
+const LEAN_MAX = 26 * DEG;
+
+/**
  * height/distance set the pitch — the whole point of the change. `look` is the
  * height of the look-at point: raising it tilts the rig up, which drops the ship
  * down the screen and puts sky above the horizon.
@@ -6263,14 +6312,19 @@ class GameCamera {
     const p = player.position;
     const rig = this.rig;
 
-    // A turning rig swings round behind the ship. `turnTo` is null whenever the
-    // aim source is an absolute screen cursor: the cursor's ground point rotates
-    // with the camera, so following it would chase its own tail forever.
-    // Falling back to world-locked matters: a rig frozen at whatever azimuth the
-    // last stick input left it at would make camera-relative movement read
-    // against a basis the player can no longer see or change.
-    if (rig.turns && turnTo !== null) this.rigYaw = dampAngle(this.rigYaw, turnTo, 0.0015, dt);
-    else this.rigYaw = dampAngle(this.rigYaw, WORLD_LOCKED, rig.turns ? 0.05 : 0.0004, dt);
+    // A turning rig leans toward the ship rather than swinging round behind it
+    // (see LEAN_MAX). `turnTo` is null whenever the aim source is an absolute
+    // screen cursor: the cursor's ground point rotates with the camera, so
+    // following it would chase its own tail. Falling back to world-locked
+    // matters: a rig frozen at whatever azimuth the last stick input left it at
+    // would make camera-relative movement read against a basis the player can
+    // no longer see or change.
+    if (rig.turns && turnTo !== null) {
+      const lean = clamp(wrapAngle(turnTo - WORLD_LOCKED), -LEAN_MAX, LEAN_MAX);
+      this.rigYaw = dampAngle(this.rigYaw, WORLD_LOCKED + lean, 0.0015, dt);
+    } else {
+      this.rigYaw = dampAngle(this.rigYaw, WORLD_LOCKED, rig.turns ? 0.05 : 0.0004, dt);
+    }
 
     // look-ahead blends motion and aim so the player sees where they're going
     let lx = 0, lz = 0;
@@ -6346,8 +6400,11 @@ class GameCamera {
     this.target.set(x, 0, z);
     this.smoothTarget.set(x, 0, z);
     this.distanceScale = 1;
-    if (this.rig.turns && facing !== undefined) this.rigYaw = facing;
-    else this.rigYaw = WORLD_LOCKED;
+    if (this.rig.turns && facing !== undefined) {
+      this.rigYaw = WORLD_LOCKED + clamp(wrapAngle(facing - WORLD_LOCKED), -LEAN_MAX, LEAN_MAX);
+    } else {
+      this.rigYaw = WORLD_LOCKED;
+    }
     const pose = this.restPose(x, z);
     this.camera.position.set(pose.pos[0], pose.pos[1], pose.pos[2]);
     this.camera.lookAt(pose.target[0], pose.target[1], pose.target[2]);
@@ -7324,18 +7381,22 @@ class World {
    */
   _spire(seed) {
     const h = 7.0 + (seed % 3) * 2.6;
-    const main = buildRock(seed * 131 + 17, { rough: 0.46, tall: 1.0, wide: 0.72 });
-    main.scale(2.7, h * 0.62, 2.7);
-    main.translate(0, h * 0.42, 0);
+    // buildRock already returns a body with a flat base near y=0, so it is
+    // seated by measuring it (see seat) rather than lifted by half its height.
+    // The unit body spans roughly [-0.12, 1.0], so the vertical scale is
+    // h / 1.12 to make the spire actually h tall — the number the obstacle
+    // record and the collision height are quoted in.
+    const main = seat(buildRock(seed * 131 + 17, { rough: 0.46, tall: 1.0, wide: 0.72 })
+      .scale(2.9, h / 1.12, 2.9), 0.55);
     const parts = [main];
     for (let i = 0; i < 3; i++) {
       const a = (i / 3) * TAU + seed;
       const r = 2.2 + (i * 0.7);
-      const g = buildRock(seed * 71 + i * 13, { detail: 2, rough: 0.55, tall: 0.7 });
       const sc = 0.8 + (i % 2) * 0.55;
-      g.scale(sc * 1.3, sc * 0.8, sc * 1.3);
-      g.rotateY(a * 2.1);
-      g.translate(Math.cos(a) * r, 0.1, Math.sin(a) * r);
+      const g = seat(buildRock(seed * 71 + i * 13, { detail: 2, rough: 0.55, tall: 0.7 })
+        .scale(sc * 1.3, sc * 0.8, sc * 1.3)
+        .rotateY(a * 2.1), 0.35 * sc);
+      g.translate(Math.cos(a) * r, 0, Math.sin(a) * r);
       parts.push(g);
     }
     return { geometry: mergeGeometries(parts), radius: 2.6, height: h };
@@ -7366,7 +7427,9 @@ class World {
         // biased outward: the middle of the arena has to stay clear to fight in
         const r = lerp(6, this.radius + 0.5, Math.pow(rng.next(), 0.55));
         const s = rng.range(spec.lo, spec.hi);
-        v.set(Math.cos(a) * r, spec.edge ? rng.range(-0.1, 0.15) : -0.06, Math.sin(a) * r);
+        // A tumbled pebble has no "down" face, so it is sunk rather than seated:
+        // half-buried always reads as resting, at any orientation.
+        v.set(Math.cos(a) * r, spec.edge ? -s * rng.range(0.25, 0.5) : -0.06, Math.sin(a) * r);
         e.set(spec.edge ? rng.next() * TAU : 0, rng.next() * TAU, spec.edge ? rng.range(-0.4, 0.4) : 0);
         q.setFromEuler(e);
         sv.set(s * rng.range(0.8, 1.3), s * rng.range(0.7, 1.2), s * rng.range(0.8, 1.3));

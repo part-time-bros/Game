@@ -12,11 +12,26 @@
  * Distance, height, look-ahead and FOV all breathe with speed, aim and threat
  * on top of whichever rig is active. Shake, roll and hit-punch are layered last.
  */
-import { clamp, clamp01, damp, dampAngle, lerp, DEG } from '../core/util.js';
+import { clamp, clamp01, damp, dampAngle, wrapAngle, lerp, DEG } from '../core/util.js';
 
 const GROUND_Y = 1.05;      // aim plane sits at ship height
 const MAX_AIM = 120;        // a grazing ray must not fling the reticle to infinity
 const WORLD_LOCKED = Math.PI;   // rig azimuth that puts the camera due south
+
+/**
+ * How far a turning rig may lean off world north.
+ *
+ * It is a clamp against an absolute reference, not a chase, and that is the
+ * whole point. The aim stick is expressed relative to the rig, so a rig that
+ * damps toward the ship's yaw closes a loop: the stick's world direction is
+ * rig + stickAngle, the ship turns to that, the rig follows the ship, and next
+ * frame the same held stick points somewhere new again. For any stick angle
+ * off screen-up that system has no fixed point and the ship spins forever —
+ * 5.4 rotations per 10 seconds at 45 degrees. Recomputing the lean from world
+ * north each frame removes the integration, so the offset saturates here and
+ * stops.
+ */
+const LEAN_MAX = 26 * DEG;
 
 /**
  * height/distance set the pitch — the whole point of the change. `look` is the
@@ -128,14 +143,19 @@ export class GameCamera {
     const p = player.position;
     const rig = this.rig;
 
-    // A turning rig swings round behind the ship. `turnTo` is null whenever the
-    // aim source is an absolute screen cursor: the cursor's ground point rotates
-    // with the camera, so following it would chase its own tail forever.
-    // Falling back to world-locked matters: a rig frozen at whatever azimuth the
-    // last stick input left it at would make camera-relative movement read
-    // against a basis the player can no longer see or change.
-    if (rig.turns && turnTo !== null) this.rigYaw = dampAngle(this.rigYaw, turnTo, 0.0015, dt);
-    else this.rigYaw = dampAngle(this.rigYaw, WORLD_LOCKED, rig.turns ? 0.05 : 0.0004, dt);
+    // A turning rig leans toward the ship rather than swinging round behind it
+    // (see LEAN_MAX). `turnTo` is null whenever the aim source is an absolute
+    // screen cursor: the cursor's ground point rotates with the camera, so
+    // following it would chase its own tail. Falling back to world-locked
+    // matters: a rig frozen at whatever azimuth the last stick input left it at
+    // would make camera-relative movement read against a basis the player can
+    // no longer see or change.
+    if (rig.turns && turnTo !== null) {
+      const lean = clamp(wrapAngle(turnTo - WORLD_LOCKED), -LEAN_MAX, LEAN_MAX);
+      this.rigYaw = dampAngle(this.rigYaw, WORLD_LOCKED + lean, 0.0015, dt);
+    } else {
+      this.rigYaw = dampAngle(this.rigYaw, WORLD_LOCKED, rig.turns ? 0.05 : 0.0004, dt);
+    }
 
     // look-ahead blends motion and aim so the player sees where they're going
     let lx = 0, lz = 0;
@@ -211,8 +231,11 @@ export class GameCamera {
     this.target.set(x, 0, z);
     this.smoothTarget.set(x, 0, z);
     this.distanceScale = 1;
-    if (this.rig.turns && facing !== undefined) this.rigYaw = facing;
-    else this.rigYaw = WORLD_LOCKED;
+    if (this.rig.turns && facing !== undefined) {
+      this.rigYaw = WORLD_LOCKED + clamp(wrapAngle(facing - WORLD_LOCKED), -LEAN_MAX, LEAN_MAX);
+    } else {
+      this.rigYaw = WORLD_LOCKED;
+    }
     const pose = this.restPose(x, z);
     this.camera.position.set(pose.pos[0], pose.pos[1], pose.pos[2]);
     this.camera.lookAt(pose.target[0], pose.target[1], pose.target[2]);

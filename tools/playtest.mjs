@@ -820,6 +820,49 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
   }
 
   // ---------------- camera rigs ----------------
+  section('WORLD GROUNDING');
+  {
+    const ground = await page.evaluate(() => {
+      const N = window.__NOVA;
+      N.start('striker', 'pilot', 'campaign', 4);
+      N.skipCinematic();
+      N.step(1 / 60, 30);
+      const w = N.game.world;
+      const box = new THREE.Box3();
+      const report = [];
+      // every placed prop: the lowest point of its world-space bounds
+      for (const m of w.pillars) {
+        box.setFromObject(m);
+        report.push({ name: m.geometry.name || 'prop', y: +box.min.y.toFixed(3) });
+      }
+      box.setFromObject(w.stabGroup);
+      report.push({ name: 'tower', y: +box.min.y.toFixed(3) });
+      const worst = report.reduce((a, b) => (b.y > a.y ? b : a));
+      // the ground surface itself, sampled across the play area
+      const pos = w.floor.geometry.attributes.position;
+      let hi = -Infinity, lo = Infinity;
+      for (let i = 0; i < pos.count; i++) {
+        const x = pos.getX(i), z = pos.getZ(i);
+        if (Math.hypot(x, z) > w.radius) continue;
+        const y = pos.getY(i);
+        if (y > hi) hi = y;
+        if (y < lo) lo = y;
+      }
+      return { report, worst, floorHi: +hi.toFixed(3), floorLo: +lo.toFixed(3) };
+    });
+    console.log(`    floor inside the arena spans ${ground.floorLo} .. ${ground.floorHi}; highest prop base ${ground.worst.y} (${ground.worst.name})`);
+    // Props are placed on the y=0 plane. A base above it hangs in the air; the
+    // spires used to float 2.4 units up because they were lifted by half their
+    // height on top of a body whose base already sat at zero.
+    check('no prop floats above the ground', ground.worst.y <= 0.02, `${ground.worst.name} base at y=${ground.worst.y}`);
+    check('props are seated, not sunk out of sight', ground.report.every((r) => r.y > -1.2),
+      ground.report.filter((r) => r.y <= -1.2).map((r) => `${r.name}@${r.y}`).join(', '));
+    // The simulation treats the ground as y=0, so the mesh has to stay just
+    // under it: above and it clips entities, far below and they hover.
+    check('the floor stays just under the entity plane', ground.floorHi <= 0.02 && ground.floorLo > -0.6,
+      `${ground.floorLo} .. ${ground.floorHi}`);
+  }
+
   section('CAMERA RIGS');
   {
     const rig = async (style) => page.evaluate((st) => {
@@ -850,6 +893,47 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
     check('pov is the lowest rig', pov.pitch < chase.pitch && pov.pitch > 15, `${pov.pitch}deg`);
     check('a low rig sees past the arena edge', chase.fov >= 60 && pov.fov >= 60, `chase ${chase.fov}, pov ${pov.fov}`);
 
+    // ---- the aim stick must not close a loop with the turning rig ----
+    // The stick is expressed relative to the rig; the ship turns to it; the rig
+    // follows the ship. Chasing the ship's yaw outright makes that circular and
+    // the ship spins forever at any stick angle off screen-up. Held stick, ten
+    // seconds, measured in full rotations.
+    const spin = await page.evaluate(async () => {
+      const N = window.__NOVA;
+      const out = [];
+      for (const deg of [0, 15, 45, 90, 150]) {
+        N.game.setSetting('cameraStyle', 'pov');
+        N.start('striker', 'pilot', 'campaign', 4);
+        N.skipCinematic();
+        N.godMode(true);
+        const a = deg * Math.PI / 180;
+        // screen-space stick: +z is toward the player, so up is -z
+        N.setInput({ aimStick: { x: Math.sin(a), z: -Math.cos(a) } });
+        N.step(1 / 60, 30);
+        const y0 = N.game.player.yaw;
+        let last = y0, total = 0;
+        for (let i = 0; i < 600; i++) {
+          N.step(1 / 60, 1);
+          let d = N.game.player.yaw - last;
+          while (d > Math.PI) d -= Math.PI * 2;
+          while (d < -Math.PI) d += Math.PI * 2;
+          total += d;
+          last = N.game.player.yaw;
+        }
+        const lean = (N.game.camera.rigYaw - Math.PI) * 180 / Math.PI;
+        out.push({ deg, turns: +(total / (Math.PI * 2)).toFixed(2), lean: +lean.toFixed(1) });
+      }
+      N.clearInput();
+      return out;
+    });
+    console.log('    held aim stick, 10s:', spin.map((r) => `${r.deg}deg=${r.turns}turns/${r.lean}deg lean`).join(' '));
+    check('a held aim stick does not spin the ship',
+      spin.every((r) => Math.abs(r.turns) < 1),
+      spin.map((r) => `${r.deg}deg -> ${r.turns} turns`).join(', '));
+    check('the rig leans toward the aim and saturates',
+      spin.every((r) => Math.abs(r.lean) <= 27) && Math.abs(spin[spin.length - 1].lean) > 8,
+      spin.map((r) => `${r.deg}deg -> ${r.lean}deg`).join(', '));
+
     // the horizontal angle is what blows out on a phone, not the vertical one
     const wide = await page.evaluate(() => {
       const c = window.__NOVA.game.camera;
@@ -864,6 +948,8 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
 
     // Turning is gated on the aim source: an absolute cursor's ground point
     // rotates with the camera, so following it would spin the rig forever.
+    // The stick lean is bounded on purpose — see LEAN_MAX in camera.js. This
+    // check used to demand an unbounded swing, which is the runaway itself.
     const turn = await page.evaluate(() => {
       const N = window.__NOVA;
       N.game.setSetting('cameraStyle', 'pov');
@@ -880,8 +966,10 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
       for (let i = 0; i < 300; i++) { N.step(1 / 60, 1); }
       return { start: +start.toFixed(3), stick: +stick.toFixed(3), pointer: +N.game.camera.rigYaw.toFixed(3) };
     });
-    check('stick aiming swings the rig behind the ship', Math.abs(turn.stick - turn.start) > 0.5,
-      `${turn.start} -> ${turn.stick}`);
+    const leanDeg = Math.abs(turn.stick - turn.start) * 180 / Math.PI;
+    check('stick aiming leans the rig, and only so far',
+      leanDeg > 8 && leanDeg <= 27,
+      `${turn.start} -> ${turn.stick} (${leanDeg.toFixed(1)}deg lean)`);
     check('cursor aiming leaves the rig world-locked', Math.abs(turn.pointer - Math.PI) < 0.05,
       `settled at ${turn.pointer}`);
 
