@@ -207,11 +207,11 @@ export class WaveDirector {
   _threatLine(w) {
     const types = this.unlockedTypes(w);
     const newest = types[types.length - 1];
-    if (w === 2) return 'NEW CONTACT — DRONE';
-    if (w === 3) return 'NEW CONTACT — SPLITTER';
-    if (w === 4) return 'NEW CONTACT — SEEDER';
-    if (w === 6) return 'NEW CONTACT — LANCER';
-    if (w === 7) return 'NEW CONTACT — SENTINEL';
+    if (w === 2) return 'NEW CONTACT — BUZZARD';
+    if (w === 3) return 'NEW CONTACT — POWDER KEG';
+    if (w === 4) return 'NEW CONTACT — MORTAR CART';
+    if (w === 6) return 'NEW CONTACT — LONGHORN';
+    if (w === 7) return 'NEW CONTACT — GATLING WALKER';
     const names = { skitter: 'SWARM', drone: 'GUNNERY', splitter: 'UNSTABLE', seeder: 'ARTILLERY', lancer: 'ARMOUR', sentinel: 'SIEGE' };
     return `${names[newest] || 'VOID'} ELEMENTS INBOUND`;
   }

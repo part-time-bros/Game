@@ -384,6 +384,56 @@ It also caught a real bug by accident: `startMusic()` never applied its mode's
 tempo, so starting into a mode inherited whatever bpm was left over from the
 last one.
 
+### 22. The cast and the ambience (`HEAD`)
+
+Asked "what would make this better". The honest answer was that the world had
+been converted and the cast had not: `rig-models.js` used the void / magenta /
+violet palette in 78 places, so a western canyon was populated by purple sci-fi
+drones. Every other visual improvement was fighting that.
+
+**The cast was re-skinned, not rebuilt.** Bone hierarchies and every authored
+clip survived untouched — what makes a coyote a coyote is geometry and palette,
+not skeleton, and a four-legged rusher with a diagonal gait and a lunge was
+already a coyote wearing the wrong colour.
+
+| was | is | why it fits |
+| --- | --- | --- |
+| Skitter | **Coyote** | four legs, diagonal gait, lunge |
+| Drone | **Buzzard** | the three hover fins became two wings and a tail |
+| Splitter | **Powder Keg** | wobbles, spins, bursts into two smaller things |
+| Seeder | **Mortar Cart** | lobs shells; the four legs became wheels |
+| Lancer | **Longhorn** | a centre bone and two side bones is a skull and horns |
+| Sentinel | **Gatling Walker** | tall, slow, jointed legs — weird-west by material |
+| Warden | **Wagon Fort** | a turning ring of plates around a core is circled wagons |
+| Harrower | **Iron Horse** | a spear, side arms and a four-segment tail is a locomotive |
+| Maw | **Rattler** | jaws, an eye and a coil |
+
+**Two bugs the renders caught, both worth remembering:**
+
+- **The horns came out crossed.** A spike points along +Y, and rotating +Y
+  about Z by θ gives `(-sinθ, cosθ, 0)` — so a *positive* angle swings it
+  toward **-X**. The left horn needed a negative angle, which is the opposite
+  of what reads naturally in the code.
+- **Dark neutrals rendered lavender.** A desaturated near-black takes its hue
+  from the ambient, and the ambient here is a prefiltered sky with blue in it.
+  The feather palette had to be warmed to stay brown in shade. Worth knowing
+  before reaching for "neutral" anything under IBL.
+
+World-space effect colours followed the cast: telegraph rings, beams, explosion
+tints and per-type colours moved from magenta and violet to ember and dust. The
+HUD was deliberately left alone — HUD is allowed to be HUD.
+
+**Ambience.** There was none at all, which left dead air between gunshots. Two
+looping noise beds with their filter cutoff and gain driven by slow oscillators
+wired straight to the AudioParams, so it costs nothing per frame and never
+needs scheduling. Gusts swell and die on their own timer; a buzzard calls, but
+only when the fighting has stopped.
+
+Measured, since it cannot be heard: **7.5x level swing** across a rendered
+minute — the number that separates weather from hiss, because a bed that never
+moves stops being heard inside a minute — and it ducks to under half in combat.
+`tools/audiomix.mjs` grew a section for continuous sources to check both.
+
 ---
 
 ## What each guard protects
@@ -444,11 +494,14 @@ Deliberately not done, or not done yet.
   3D one. `src/render/rig-models.js` builds the current ships; a supplied model
   would need `position`/`normal`/`aColor`/`aEmit` and, to animate, an `aBone`
   index per vertex.
-- **Western cast** (task #18): the enemies and bosses are still the original
-  sci-fi archetypes. A mounted rider, bandits and a locomotive boss were
-  planned.
-- **Wind and ambience** (part of task #19): gunfire and the score are done;
-  there is no wind bed or environmental layer.
+- **Weapons that differ in kind, not degree.** The three chassis fire the same
+  single projectile with the same pulse — they are stat sliders, not different
+  guns. A revolver / scattergun / rifle split would change how the game is
+  played rather than how fast things die. This is the next real gameplay lever,
+  and the one carrying the most risk, because feel cannot be measured here.
+- **Destructible cover.** `buildRock` and the debris system already exist;
+  shooting a chunk off a butte would be a large feel win for medium cost.
+- **Enemy behaviour past wave 25** still leans on HP rather than new mechanics.
 - **The water tower is still boxes and cylinders.** Deliberate — it is sawn
   timber, and sawn timber is boxes — but it has had no weathering pass.
 - **`main` is not the repository's default branch.** Not settable from here;

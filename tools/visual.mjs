@@ -50,7 +50,12 @@ const SCENES = {
     g.waves.clear(); g.enemies.clear(); g.timers.length = 0;
     g.player.position.set(0,1.05,44); g.player.velocity.set(0,0,0);
     const types = ['skitter','drone','splitter','seeder','lancer','sentinel'];
-    const spots = types.map((t,i) => ({ t, x: -11.5 + i*4.6, z: 20 }));
+    // Spread across an empty stretch of floor and hide the standing rock, or a
+    // butte parks itself in front of the line-up on the bigger arena.
+    g.world.pillars.forEach(m => { m.visible = false; });
+    g.world.scatter.forEach(m => { m.visible = false; });
+    g.world.stabGroup.visible = false;
+    const spots = types.map((t,i) => ({ t, x: -12 + i*4.8, z: 20 }));
     spots.forEach(s => {
       const e = g.enemies.spawn(s.t, s.x, s.z);
       if (e) { e.state='active'; e.spawnT=1; e.mat.uniforms.uDissolve.value=0; e.mesh.scale.setScalar(e.scale); e.pin = s; }
@@ -64,7 +69,7 @@ const SCENES = {
       });
     }
     g.rings.clear(); g.fx.clear(); g.ui.el.banner.innerHTML = '';
-    N.setCamera({ x: 0, y: 10, z: 40, tx: 0, ty: 1.1, tz: 19.5 });
+    N.setCamera({ x: 0, y: 4.6, z: 31, tx: 0, ty: 1.3, tz: 19.5 });
     N.step(1/60,1);
     g.ui.el.banner.innerHTML = '';
   `,

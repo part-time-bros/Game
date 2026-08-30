@@ -44,6 +44,27 @@ export const PALETTE = {
   brass: 0xb08a3c,
   cloth: 0xa89377,
   ember: 0xff8a3c,
+
+  // ---- the cast ----
+  // Hide, feather, iron and timber. The old cast was void/magenta/violet, which
+  // is a fine palette for a nebula and reads as parody in a canyon.
+  hide: 0x8a6b4a,
+  hideDark: 0x54402c,
+  hideLite: 0xb2926e,
+  mane: 0x6a5138,
+  feather: 0x4c3d2c,
+  featherDark: 0x2c2318,
+  featherLite: 0x86704f,
+  beak: 0xd0b478,
+  steerHide: 0x6e4630,
+  steerHideDark: 0x40291d,
+  gunmetal: 0x3b332a,
+  kegWood: 0x7a5a3c,
+  kegBand: 0x3c3630,
+  // Kept deliberately sparing. Glowing eyes belong to the old art direction,
+  // but a game this fast still needs weak points and telegraphs to read at
+  // distance, so emissive survives on embers, fuses and muzzles only.
+  emberDim: 0xc4551e,
 };
 
 /** Accumulates transformed primitives into one flat geometry. */

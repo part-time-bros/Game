@@ -36,7 +36,49 @@ const rows = await page.evaluate(async () => {
   }
   return out;
 });
+// Ambience is a continuous bed, not a cue, so it never appears above. Render
+// it on its own and check the two things that can go wrong: inaudible (the
+// silence it exists to fill comes straight back) or loud enough to sit on top
+// of the gunfire it is supposed to sit under.
+const amb = await page.evaluate(async () => {
+  const Engine = window.__NOVA.game.audio.constructor;
+  const rate = 22050, secs = 12;
+  const out = [];
+  for (const [label, I] of [['idle', 0], ['combat', 0.8]]) {
+    const off = new OfflineAudioContext(1, rate * secs, rate);
+    const eng = new Engine(); eng.init(off); eng.setVolumes(1, 1, 1);
+    eng.startAmbience();
+    eng.setIntensity(I);
+    // the once-a-second tick does not run in an offline render; drive it
+    for (let i = 0; i < secs; i++) eng._ambTick();
+    const buf = await off.startRendering();
+    const d = buf.getChannelData(0);
+    let peak = 0, sum = 0, zc = 0;
+    for (let i = 0; i < d.length; i++) {
+      const v = Math.abs(d[i]); if (v > peak) peak = v; sum += d[i] * d[i];
+      if (i && ((d[i] < 0) !== (d[i - 1] < 0))) zc++;
+    }
+    // how much the level moves across the render: a bed that never swells
+    // reads as hiss and stops being heard within a minute
+    const win = Math.floor(rate * 0.5);
+    const lv = [];
+    for (let i = 0; i + win < d.length; i += win) {
+      let e = 0; for (let j = i; j < i + win; j++) e += d[j] * d[j];
+      lv.push(Math.sqrt(e / win));
+    }
+    const lo = Math.min(...lv), hi = Math.max(...lv);
+    out.push({ label, peak: +peak.toFixed(4), rms: +Math.sqrt(sum / d.length).toFixed(5),
+               brightHz: Math.round(zc / secs / 2), swing: +(hi / Math.max(1e-6, lo)).toFixed(2) });
+  }
+  return out;
+});
+
 rows.sort((a,b) => b.peak - a.peak);
+console.log('ambience        peak     rms      brightness  level swing');
+for (const a of amb) {
+  console.log(`${a.label.padEnd(14)} ${String(a.peak).padStart(6)}  ${String(a.rms).padStart(7)}  ${String(a.brightHz).padStart(8)} Hz  ${String(a.swing).padStart(6)}x`);
+}
+console.log('');
 console.log('effect          peak     rms      dur(ms)');
 for (const r of rows) console.log(r.n.padEnd(15), String(r.peak).padStart(7), String(r.rms).padStart(8), String(r.ms).padStart(6));
 await browser.close();

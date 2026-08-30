@@ -86,24 +86,29 @@ left alone, because it does not need help and stealing precision feels bad.
 
 | | Threat |
 | --- | --- |
-| **Skitter** | Swarm rusher. Lunges and detonates — punishes standing still. |
-| **Drone** | Standoff gunnery. Orbits at range and chips — punishes passivity. |
-| **Splitter** | Breaks into two Skitters on death — punishes greedy clears. |
-| **Seeder** | Lobs mortars at where you are *going* — punishes camping. |
-| **Lancer** | Winds up, then crosses the deck — punishes tunnel vision. |
-| **Sentinel** | Paints a line, then deletes it — punishes lazy positioning. |
+| **Coyote** | Swarm rusher. Lunges and keeps coming — punishes standing still. |
+| **Buzzard** | Circles at range and picks — punishes passivity. |
+| **Powder Keg** | Rolls in lit, bursts into two coyotes — punishes greedy clears. |
+| **Mortar Cart** | Lobs shells at where you are *going* — punishes camping. |
+| **Longhorn** | Paws once, then charges — punishes tunnel vision. |
+| **Gatling Walker** | Paints a line, then deletes it — punishes lazy positioning. |
 
 **Three bosses** with phase ladders, telegraphed attack scripts and distinct
-mechanics — the Warden (orbital plates, spiral fire, arena slam), the Harrower
-(sweeping beams, charge runs, minefields) and the Void Maw (jaw shockwaves,
-void zones, a vacuum phase that exposes its eye as a weak point).
+mechanics — the Wagon Fort (a turning ring of wagons, spiral fire, ground
+slam), the Iron Horse (sweeping fire, charge runs, minefields) and the Rattler
+(jaw shockwaves, poison ground, a coil phase that exposes its eye).
 
 **Real skeletal animation.** Every enemy and chassis is a rigged model with
-authored clips, not a spinning mesh: Skitters scuttle on four articulated legs
-and crouch before a lunge, Sentinels stride on a tripod gait and brace before
-firing, Lancers pump their legs into a charge, Seeder barrels recoil in
-sequence, ship wings fold back on a dash. Hits produce a flinch away from the
-impact; death drives a limp collapse through the rig.
+authored clips, not a spinning mesh: coyotes run a diagonal gait on four
+articulated legs and crouch before a lunge, the Gatling Walker strides and
+braces before firing, the Longhorn pumps its legs into a charge, mortar tubes
+recoil in sequence, ship wings fold back on a dash. Hits produce a flinch away
+from the impact; death drives a limp collapse through the rig.
+
+The cast was re-skinned rather than rebuilt: the bone hierarchies and every
+authored clip survived the change, because what makes a coyote a coyote and a
+buzzard a buzzard is geometry and palette, not skeleton. A four-legged rusher
+with a diagonal gait and a lunge was already a coyote wearing the wrong colour.
 
 **Cinematics.** Deployment opens on a wide sweep while the hull materialises;
 each boss arrives on a letterboxed low-angle push-in anchored to its live
@@ -134,8 +139,14 @@ Phantom (three dashes, glass) — unlocked by reaching waves 5 and 10.
 | Ground | Displaced polar mesh under a fragment shader that adds Worley F2-F1 crazing in dried clay, patchy so it never covers the basin evenly, plus eight live impact ripples. |
 | Sky | An equirectangular nebula painted once into a canvas: fbm cloud layers sampled on a circle (so it tiles), three star populations, cross flares. |
 | Particles | Canvas-painted glow/smoke/shard sprites over a data-oriented `Points` system — one draw call per blend mode. |
+| Ambience | Two looping noise beds whose filter cutoff and gain are driven by slow oscillators wired straight to the AudioParams, so the wind costs nothing per frame. Gusts swell and die on their own schedule, and a buzzard calls when the fighting stops. |
 | Sound | WebAudio synthesis: oscillators, filtered noise bursts and a procedural convolution reverb. Thirty-six distinct effects. Firearms are built the way one is shaped — a sub-millisecond broadband crack, a low muzzle blast, and a tail rolling back off the canyon — because a pitch-swept oscillator is a laser however you tune it. |
 | Music | A generative sequencer over a D-minor vamp, voiced as an ensemble rather than a synth: plucked guitar chord tones, upright bass, hand drum and woodblock, and a two-reed harmonica lead that only speaks at phrase boundaries. Layers, tempo and brightness follow combat intensity. |
+
+The bed measures at a 7.5x level swing across a rendered minute, which is the
+number that separates weather from hiss — a steady bed stops being heard inside
+a minute — and it ducks to under half in combat, because wind under gunfire is
+mud and the silence it was covering is gone.
 
 Neither the mix nor the character of the sounds was judged by ear, because
 there is no ear here. `node tools/audiomix.mjs` renders every effect through an

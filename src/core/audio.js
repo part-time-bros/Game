@@ -29,6 +29,13 @@ export class AudioEngine {
     this.ready = false;
     this.failed = false;
     this.master = 0.85; this.musicVol = 0.6; this.sfxVol = 0.9;
+    // Ambience follows the music slider — it is scenery, not signal — but at
+    // its own level, because a wind bed at music volume drowns the score.
+    this.ambVol = 0.42;
+    this._amb = null;
+    this._ambTimer = null;
+    this._ambTarget = 0;
+    this._ambIntensity = 0;
     this._lastPlay = new Map();
     this._voices = 0;
     this._maxVoices = 26;
@@ -96,6 +103,16 @@ export class AudioEngine {
       this.musSend.connect(this.reverb);
       this.musBus.connect(this.musSend);
 
+      // Ambience rides its own bus so combat can duck it without touching the
+      // score, and so it survives stopMusic().
+      this.ambBus = ctx.createGain();
+      this.ambBus.gain.value = 0;
+      this.ambBus.connect(this.masterBus);
+      this.ambSend = ctx.createGain();
+      this.ambSend.gain.value = 0.18;
+      this.ambSend.connect(this.reverb);
+      this.ambBus.connect(this.ambSend);
+
       this.noise = this._makeNoise(2.0);
       this.ready = true;
       this._nextNoteTime = ctx.currentTime + 0.08;
@@ -120,6 +137,8 @@ export class AudioEngine {
     this.masterBus.gain.setTargetAtTime(master, t, 0.02);
     this.sfxBus.gain.setTargetAtTime(sfx, t, 0.02);
     this.musBus.gain.setTargetAtTime(this.musicOn ? music : 0, t, 0.05);
+    this.ambVol = 0.42 * music;
+    if (this.ambBus) this.ambBus.gain.setTargetAtTime(this.ambVol * this._ambTarget, t, 0.05);
   }
 
   _makeNoise(seconds) {
@@ -527,6 +546,150 @@ export class AudioEngine {
   }
 
   // ======================================================================
+  //  Ambience
+  // ======================================================================
+  /**
+   * The desert bed: wind, gusts, and the odd buzzard.
+   *
+   * There was nothing here at all before, which left dead air between
+   * gunshots — the single loudest absence in the mix. Wind is a continuous
+   * source rather than a cue, so it is built once and left running: two
+   * looping noise beds whose filter cutoff and gain are driven by slow
+   * oscillators connected straight to the AudioParams, which costs nothing per
+   * frame and never needs scheduling.
+   *
+   * Gusts are the part that makes it read as weather rather than as hiss. A
+   * steady bed is quickly ignored; something that swells and dies is not.
+   */
+  startAmbience() {
+    if (!this.ready || this._amb) return;
+    const ctx = this.ctx;
+    const t0 = this._now();
+    const amb = { nodes: [], gusting: false };
+
+    // --- layer 1: the low bed, the body of the wind ---
+    const bed = ctx.createBufferSource();
+    bed.buffer = this.noise;
+    bed.loop = true;
+    const bedLp = ctx.createBiquadFilter();
+    bedLp.type = 'lowpass';
+    bedLp.frequency.value = 320;
+    bedLp.Q.value = 0.6;
+    const bedGain = ctx.createGain();
+    bedGain.gain.value = 0.16;
+    bed.connect(bedLp); bedLp.connect(bedGain); bedGain.connect(this.ambBus);
+    bed.start(t0);
+    amb.nodes.push(bed);
+
+    // --- layer 2: the higher hiss, sand moving over stone ---
+    const air = ctx.createBufferSource();
+    air.buffer = this.noise;
+    air.loop = true;
+    air.playbackRate.value = 0.83;      // detune it off the bed so they do not phase
+    const airBp = ctx.createBiquadFilter();
+    airBp.type = 'bandpass';
+    airBp.frequency.value = 1500;
+    airBp.Q.value = 0.7;
+    const airGain = ctx.createGain();
+    airGain.gain.value = 0.035;
+    air.connect(airBp); airBp.connect(airGain); airGain.connect(this.ambBus);
+    air.start(t0 + 0.13);
+    amb.nodes.push(air);
+
+    // --- slow modulation, so neither layer sits still ---
+    const lfo = (rate, depth, target, phaseDelay) => {
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.value = rate;
+      const g = ctx.createGain();
+      g.gain.value = depth;
+      o.connect(g); g.connect(target);
+      o.start(t0 + phaseDelay);
+      amb.nodes.push(o);
+      return o;
+    };
+    lfo(0.041, 190, bedLp.frequency, 0);
+    lfo(0.017, 0.055, bedGain.gain, 3.1);
+    lfo(0.033, 700, airBp.frequency, 1.7);
+    lfo(0.023, 0.022, airGain.gain, 0.4);
+
+    amb.bedLp = bedLp; amb.bedGain = bedGain;
+    amb.airBp = airBp; amb.airGain = airGain;
+    this._amb = amb;
+    this._ambTimer = setInterval(() => this._ambTick(), 1000);
+    this.setAmbience(1);
+  }
+
+  /** One gust, scheduled ahead on the audio clock rather than driven per frame. */
+  _gust(strength = 1) {
+    if (!this._amb) return;
+    const ctx = this.ctx;
+    const t0 = this._now() + 0.05;
+    const rise = 1.6 + Math.random() * 2.2;
+    const fall = 2.4 + Math.random() * 3.4;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noise;
+    src.loop = true;
+    src.playbackRate.value = 0.7 + Math.random() * 0.5;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 0.55;
+    bp.frequency.setValueAtTime(420, t0);
+    bp.frequency.linearRampToValueAtTime(900 + Math.random() * 1400, t0 + rise);
+    bp.frequency.linearRampToValueAtTime(380, t0 + rise + fall);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(0.05 * strength, t0 + rise);
+    g.gain.linearRampToValueAtTime(0.0001, t0 + rise + fall);
+    src.connect(bp); bp.connect(g); g.connect(this.ambBus);
+    src.start(t0);
+    src.stop(t0 + rise + fall + 0.1);
+    this._voice(src);
+  }
+
+  /** A buzzard, somewhere out past the rim. Two descending notes, and rare. */
+  _buzzard() {
+    const t0 = this._now() + 0.05;
+    const f = 900 + Math.random() * 260;
+    this._tone({ type: 'sawtooth', f0: f, f1: f * 0.55, dur: 0.42, gain: 0.035, at: t0, attack: 0.05, dest: this.ambBus, filter: 'bandpass', cutoff0: 1500, cutoff1: 800, q: 4.5 });
+    this._tone({ type: 'sawtooth', f0: f * 0.86, f1: f * 0.48, dur: 0.5, gain: 0.028, at: t0 + 0.5, attack: 0.06, dest: this.ambBus, filter: 'bandpass', cutoff0: 1400, cutoff1: 700, q: 4.5 });
+  }
+
+  /** Once a second: decide whether the desert does anything. */
+  _ambTick() {
+    if (!this.ready || !this._amb) return;
+    if (!this.offline && this.ctx.state !== 'running') return;
+    // gusts roughly every 9-16s, buzzards far rarer and never mid-fight
+    if (Math.random() < 0.085) this._gust(0.7 + Math.random() * 0.7);
+    if (this._ambIntensity < 0.35 && Math.random() < 0.012) this._buzzard();
+  }
+
+  /**
+   * How present the bed is. Combat pushes it down: wind under gunfire is mud,
+   * and the space it was filling is no longer empty.
+   */
+  setAmbience(v) {
+    this._ambTarget = clamp01(v);
+    if (!this.ready) return;
+    const g = this.ambBus.gain;
+    const t = this._now();
+    g.cancelScheduledValues(t);
+    g.setValueAtTime(g.value, t);
+    g.linearRampToValueAtTime(this.ambVol * this._ambTarget, t + 1.6);
+  }
+
+  stopAmbience(fade = 0.8) {
+    if (!this.ready || !this._amb) return;
+    if (this._ambTimer) { clearInterval(this._ambTimer); this._ambTimer = null; }
+    const t = this._now();
+    this.ambBus.gain.cancelScheduledValues(t);
+    this.ambBus.gain.setValueAtTime(this.ambBus.gain.value, t);
+    this.ambBus.gain.linearRampToValueAtTime(0, t + fade);
+    for (const n of this._amb.nodes) { try { n.stop(t + fade + 0.1); } catch (e) { /* already stopped */ } }
+    this._amb = null;
+  }
+
+  // ======================================================================
   //  Generative soundtrack
   // ======================================================================
   /** Tempo per mode. A spaghetti-western vamp walks; it does not sprint. */
@@ -564,7 +727,13 @@ export class AudioEngine {
     this._bpm = this._tempoFor(mode);
   }
 
-  setIntensity(v) { this._targetIntensity = clamp01(v); }
+  setIntensity(v) {
+    this._targetIntensity = clamp01(v);
+    this._ambIntensity = this._targetIntensity;
+    // Wind under gunfire is mud, and the silence it was covering is gone.
+    const want = 1 - this._targetIntensity * 0.62;
+    if (Math.abs(want - this._ambTarget) > 0.06) this.setAmbience(want);
+  }
 
   _scheduler() {
     if (!this.ready || !this.musicOn || (!this.offline && this.ctx.state !== 'running')) return;
@@ -695,6 +864,7 @@ export class AudioEngine {
   }
 
   dispose() {
+    this.stopAmbience(0.05);
     this.stopMusic(0.05);
     if (this._timer) { clearInterval(this._timer); this._timer = null; }
     try { if (this.ctx) this.ctx.close(); } catch (e) { /* ignore */ }

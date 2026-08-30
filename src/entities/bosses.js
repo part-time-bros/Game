@@ -14,19 +14,19 @@ import { Pose, Animator } from '../render/rig.js';
 
 export const BOSS_DEFS = {
   warden: {
-    id: 'warden', name: 'THE WARDEN', hp: 1800, radius: 6.4, scale: 1.3, contact: 20,
+    id: 'warden', name: 'THE WAGON FORT', hp: 1800, radius: 6.4, scale: 1.3, contact: 20,
     score: 1400, phases: [0.66, 0.33],
-    title: 'GATE-KEEPER OF THE FIFTH RIFT',
+    title: 'THEY CIRCLED UP AND NEVER LEFT',
   },
   harrower: {
-    id: 'harrower', name: 'THE HARROWER', hp: 3300, radius: 5.4, scale: 1.18, contact: 24,
+    id: 'harrower', name: 'THE IRON HORSE', hp: 3300, radius: 5.4, scale: 1.18, contact: 24,
     score: 2600, phases: [0.70, 0.35],
-    title: 'BLADE OF THE TENTH RIFT',
+    title: 'IT KEEPS TO NO TRACK',
   },
   maw: {
-    id: 'maw', name: 'THE VOID MAW', hp: 5200, radius: 7.8, scale: 1.06, contact: 30,
+    id: 'maw', name: 'THE RATTLER', hp: 5200, radius: 7.8, scale: 1.06, contact: 30,
     score: 5000, phases: [0.72, 0.40],
-    title: 'THAT WHICH EATS STABILIZERS',
+    title: 'IT GIVES YOU ONE WARNING',
   },
 };
 

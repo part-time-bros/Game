@@ -201,7 +201,7 @@ export class ParticleFX {
   }
 
   /** Full destruction: flash, fireball, sparks, smoke and rising embers. */
-  explode(x, y, z, radius = 1, colorA = 0xffd08a, colorB = 0xff3ea5) {
+  explode(x, y, z, radius = 1, colorA = 0xffd08a, colorB = 0xc4551e) {
     const r = this.rng;
     this.glow.spawn({ x, y, z, color: 0xffffff, color2: colorA, size: 8 * radius, size2: 1, life: 0.19, alpha: 1, drag: 5 });
     const n = this._n(16 * radius);

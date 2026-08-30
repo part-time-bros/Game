@@ -1102,6 +1102,13 @@ class AudioEngine {
     this.ready = false;
     this.failed = false;
     this.master = 0.85; this.musicVol = 0.6; this.sfxVol = 0.9;
+    // Ambience follows the music slider — it is scenery, not signal — but at
+    // its own level, because a wind bed at music volume drowns the score.
+    this.ambVol = 0.42;
+    this._amb = null;
+    this._ambTimer = null;
+    this._ambTarget = 0;
+    this._ambIntensity = 0;
     this._lastPlay = new Map();
     this._voices = 0;
     this._maxVoices = 26;
@@ -1169,6 +1176,16 @@ class AudioEngine {
       this.musSend.connect(this.reverb);
       this.musBus.connect(this.musSend);
 
+      // Ambience rides its own bus so combat can duck it without touching the
+      // score, and so it survives stopMusic().
+      this.ambBus = ctx.createGain();
+      this.ambBus.gain.value = 0;
+      this.ambBus.connect(this.masterBus);
+      this.ambSend = ctx.createGain();
+      this.ambSend.gain.value = 0.18;
+      this.ambSend.connect(this.reverb);
+      this.ambBus.connect(this.ambSend);
+
       this.noise = this._makeNoise(2.0);
       this.ready = true;
       this._nextNoteTime = ctx.currentTime + 0.08;
@@ -1193,6 +1210,8 @@ class AudioEngine {
     this.masterBus.gain.setTargetAtTime(master, t, 0.02);
     this.sfxBus.gain.setTargetAtTime(sfx, t, 0.02);
     this.musBus.gain.setTargetAtTime(this.musicOn ? music : 0, t, 0.05);
+    this.ambVol = 0.42 * music;
+    if (this.ambBus) this.ambBus.gain.setTargetAtTime(this.ambVol * this._ambTarget, t, 0.05);
   }
 
   _makeNoise(seconds) {
@@ -1600,6 +1619,150 @@ class AudioEngine {
   }
 
   // ======================================================================
+  //  Ambience
+  // ======================================================================
+  /**
+   * The desert bed: wind, gusts, and the odd buzzard.
+   *
+   * There was nothing here at all before, which left dead air between
+   * gunshots — the single loudest absence in the mix. Wind is a continuous
+   * source rather than a cue, so it is built once and left running: two
+   * looping noise beds whose filter cutoff and gain are driven by slow
+   * oscillators connected straight to the AudioParams, which costs nothing per
+   * frame and never needs scheduling.
+   *
+   * Gusts are the part that makes it read as weather rather than as hiss. A
+   * steady bed is quickly ignored; something that swells and dies is not.
+   */
+  startAmbience() {
+    if (!this.ready || this._amb) return;
+    const ctx = this.ctx;
+    const t0 = this._now();
+    const amb = { nodes: [], gusting: false };
+
+    // --- layer 1: the low bed, the body of the wind ---
+    const bed = ctx.createBufferSource();
+    bed.buffer = this.noise;
+    bed.loop = true;
+    const bedLp = ctx.createBiquadFilter();
+    bedLp.type = 'lowpass';
+    bedLp.frequency.value = 320;
+    bedLp.Q.value = 0.6;
+    const bedGain = ctx.createGain();
+    bedGain.gain.value = 0.16;
+    bed.connect(bedLp); bedLp.connect(bedGain); bedGain.connect(this.ambBus);
+    bed.start(t0);
+    amb.nodes.push(bed);
+
+    // --- layer 2: the higher hiss, sand moving over stone ---
+    const air = ctx.createBufferSource();
+    air.buffer = this.noise;
+    air.loop = true;
+    air.playbackRate.value = 0.83;      // detune it off the bed so they do not phase
+    const airBp = ctx.createBiquadFilter();
+    airBp.type = 'bandpass';
+    airBp.frequency.value = 1500;
+    airBp.Q.value = 0.7;
+    const airGain = ctx.createGain();
+    airGain.gain.value = 0.035;
+    air.connect(airBp); airBp.connect(airGain); airGain.connect(this.ambBus);
+    air.start(t0 + 0.13);
+    amb.nodes.push(air);
+
+    // --- slow modulation, so neither layer sits still ---
+    const lfo = (rate, depth, target, phaseDelay) => {
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.value = rate;
+      const g = ctx.createGain();
+      g.gain.value = depth;
+      o.connect(g); g.connect(target);
+      o.start(t0 + phaseDelay);
+      amb.nodes.push(o);
+      return o;
+    };
+    lfo(0.041, 190, bedLp.frequency, 0);
+    lfo(0.017, 0.055, bedGain.gain, 3.1);
+    lfo(0.033, 700, airBp.frequency, 1.7);
+    lfo(0.023, 0.022, airGain.gain, 0.4);
+
+    amb.bedLp = bedLp; amb.bedGain = bedGain;
+    amb.airBp = airBp; amb.airGain = airGain;
+    this._amb = amb;
+    this._ambTimer = setInterval(() => this._ambTick(), 1000);
+    this.setAmbience(1);
+  }
+
+  /** One gust, scheduled ahead on the audio clock rather than driven per frame. */
+  _gust(strength = 1) {
+    if (!this._amb) return;
+    const ctx = this.ctx;
+    const t0 = this._now() + 0.05;
+    const rise = 1.6 + Math.random() * 2.2;
+    const fall = 2.4 + Math.random() * 3.4;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noise;
+    src.loop = true;
+    src.playbackRate.value = 0.7 + Math.random() * 0.5;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 0.55;
+    bp.frequency.setValueAtTime(420, t0);
+    bp.frequency.linearRampToValueAtTime(900 + Math.random() * 1400, t0 + rise);
+    bp.frequency.linearRampToValueAtTime(380, t0 + rise + fall);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(0.05 * strength, t0 + rise);
+    g.gain.linearRampToValueAtTime(0.0001, t0 + rise + fall);
+    src.connect(bp); bp.connect(g); g.connect(this.ambBus);
+    src.start(t0);
+    src.stop(t0 + rise + fall + 0.1);
+    this._voice(src);
+  }
+
+  /** A buzzard, somewhere out past the rim. Two descending notes, and rare. */
+  _buzzard() {
+    const t0 = this._now() + 0.05;
+    const f = 900 + Math.random() * 260;
+    this._tone({ type: 'sawtooth', f0: f, f1: f * 0.55, dur: 0.42, gain: 0.035, at: t0, attack: 0.05, dest: this.ambBus, filter: 'bandpass', cutoff0: 1500, cutoff1: 800, q: 4.5 });
+    this._tone({ type: 'sawtooth', f0: f * 0.86, f1: f * 0.48, dur: 0.5, gain: 0.028, at: t0 + 0.5, attack: 0.06, dest: this.ambBus, filter: 'bandpass', cutoff0: 1400, cutoff1: 700, q: 4.5 });
+  }
+
+  /** Once a second: decide whether the desert does anything. */
+  _ambTick() {
+    if (!this.ready || !this._amb) return;
+    if (!this.offline && this.ctx.state !== 'running') return;
+    // gusts roughly every 9-16s, buzzards far rarer and never mid-fight
+    if (Math.random() < 0.085) this._gust(0.7 + Math.random() * 0.7);
+    if (this._ambIntensity < 0.35 && Math.random() < 0.012) this._buzzard();
+  }
+
+  /**
+   * How present the bed is. Combat pushes it down: wind under gunfire is mud,
+   * and the space it was filling is no longer empty.
+   */
+  setAmbience(v) {
+    this._ambTarget = clamp01(v);
+    if (!this.ready) return;
+    const g = this.ambBus.gain;
+    const t = this._now();
+    g.cancelScheduledValues(t);
+    g.setValueAtTime(g.value, t);
+    g.linearRampToValueAtTime(this.ambVol * this._ambTarget, t + 1.6);
+  }
+
+  stopAmbience(fade = 0.8) {
+    if (!this.ready || !this._amb) return;
+    if (this._ambTimer) { clearInterval(this._ambTimer); this._ambTimer = null; }
+    const t = this._now();
+    this.ambBus.gain.cancelScheduledValues(t);
+    this.ambBus.gain.setValueAtTime(this.ambBus.gain.value, t);
+    this.ambBus.gain.linearRampToValueAtTime(0, t + fade);
+    for (const n of this._amb.nodes) { try { n.stop(t + fade + 0.1); } catch (e) { /* already stopped */ } }
+    this._amb = null;
+  }
+
+  // ======================================================================
   //  Generative soundtrack
   // ======================================================================
   /** Tempo per mode. A spaghetti-western vamp walks; it does not sprint. */
@@ -1637,7 +1800,13 @@ class AudioEngine {
     this._bpm = this._tempoFor(mode);
   }
 
-  setIntensity(v) { this._targetIntensity = clamp01(v); }
+  setIntensity(v) {
+    this._targetIntensity = clamp01(v);
+    this._ambIntensity = this._targetIntensity;
+    // Wind under gunfire is mud, and the silence it was covering is gone.
+    const want = 1 - this._targetIntensity * 0.62;
+    if (Math.abs(want - this._ambTarget) > 0.06) this.setAmbience(want);
+  }
 
   _scheduler() {
     if (!this.ready || !this.musicOn || (!this.offline && this.ctx.state !== 'running')) return;
@@ -1768,6 +1937,7 @@ class AudioEngine {
   }
 
   dispose() {
+    this.stopAmbience(0.05);
     this.stopMusic(0.05);
     if (this._timer) { clearInterval(this._timer); this._timer = null; }
     try { if (this.ctx) this.ctx.close(); } catch (e) { /* ignore */ }
@@ -3586,6 +3756,27 @@ const PALETTE = {
   brass: 0xb08a3c,
   cloth: 0xa89377,
   ember: 0xff8a3c,
+
+  // ---- the cast ----
+  // Hide, feather, iron and timber. The old cast was void/magenta/violet, which
+  // is a fine palette for a nebula and reads as parody in a canyon.
+  hide: 0x8a6b4a,
+  hideDark: 0x54402c,
+  hideLite: 0xb2926e,
+  mane: 0x6a5138,
+  feather: 0x4c3d2c,
+  featherDark: 0x2c2318,
+  featherLite: 0x86704f,
+  beak: 0xd0b478,
+  steerHide: 0x6e4630,
+  steerHideDark: 0x40291d,
+  gunmetal: 0x3b332a,
+  kegWood: 0x7a5a3c,
+  kegBand: 0x3c3630,
+  // Kept deliberately sparing. Glowing eyes belong to the old art direction,
+  // but a game this fast still needs weak points and telegraphs to read at
+  // distance, so emissive survives on embers, fuses and muzzles only.
+  emberDim: 0xc4551e,
 };
 
 /** Accumulates transformed primitives into one flat geometry. */
@@ -5027,7 +5218,7 @@ function buildRiggedShip(kind = 'striker') {
 }
 
 // ======================================================================
-//  SKITTER — four-legged rusher
+//  COYOTE — four-legged rusher
 // ======================================================================
 function buildRiggedSkitter() {
   const r = new RigBuilder();
@@ -5044,21 +5235,33 @@ function buildRiggedSkitter() {
     r.addBone('leg' + id + 'b', 'leg' + id, [0, -0.56, 0], [0, 0, -sx * 1.15]);
   }
 
-  r.part(PRIM.oct(0), { bone: 'body', scale: [1.05, 0.72, 1.25], color: PALETTE.voidMid });
-  r.part(PRIM.oct(0), { bone: 'body', pos: [0, 0.18, 0], scale: [0.62, 0.5, 0.7], color: PALETTE.voidDark });
-  r.part(PRIM.box(), { bone: 'body', pos: [0, 0.34, 0], scale: [0.06, 0.06, 1.0], color: PALETTE.magenta, emit: 2.2 });
+  // A lean, half-starved coyote. The bones already described a four-legged
+  // scuttler with a diagonal gait and a lunge; only the flesh needed replacing.
+  r.part(PRIM.sph(9, 7), { bone: 'body', scale: [0.62, 0.56, 0.98], color: PALETTE.hide, flat: false });
+  r.part(PRIM.sph(8, 6), { bone: 'body', pos: [0, 0.02, 0.44], scale: [0.54, 0.52, 0.5], color: PALETTE.hideDark, flat: false });
+  // ribs showing through the hide
   for (let i = 0; i < 3; i++) {
-    r.part(PRIM.box(), { bone: 'body', pos: [0, 0.26, -0.3 + i * 0.3], scale: [0.5 - i * 0.1, 0.05, 0.08], color: PALETTE.voidLite });
+    r.part(PRIM.box(), { bone: 'body', pos: [0, 0.16, -0.18 + i * 0.24], scale: [0.5 - i * 0.05, 0.05, 0.06], color: PALETTE.hideLite });
   }
-  r.part(PRIM.sph(8, 6), { bone: 'head', scale: 0.36, color: PALETTE.magenta, emit: 3.2, flat: false });
-  r.part(PRIM.tor(0.5, 0.1, 5, 10), { bone: 'head', rot: [Math.PI / 2, 0, 0], scale: 0.5, color: PALETTE.voidLite, flat: false });
+  // hackles down the spine
+  for (let i = 0; i < 4; i++) {
+    r.part(PRIM.spike(0.2, 0.05, 3), { bone: 'body', pos: [0, 0.34, -0.3 + i * 0.24], rot: [-0.5, 0, 0], color: PALETTE.mane });
+  }
+  r.part(PRIM.cyl(6), { bone: 'body', pos: [0, 0.06, 0.72], rot: [1.15, 0, 0], scale: [0.12, 0.62, 0.12], color: PALETTE.mane });
+  // head: skull, muzzle, ears, and the one glint that keeps it readable at range
+  r.part(PRIM.sph(8, 6), { bone: 'head', scale: [0.3, 0.28, 0.34], color: PALETTE.hide, flat: false });
+  r.part(PRIM.spike(0.42, 0.17, 5), { bone: 'head', pos: [0, -0.04, -0.16], rot: [-Math.PI / 2, 0, 0], color: PALETTE.hideDark });
+  r.part(PRIM.spike(0.24, 0.1, 3), { bone: 'head', pos: [0.15, 0.22, 0.06], rot: [-0.3, 0, 0.35], color: PALETTE.hideDark });
+  r.part(PRIM.spike(0.24, 0.1, 3), { bone: 'head', pos: [-0.15, 0.22, 0.06], rot: [-0.3, 0, -0.35], color: PALETTE.hideDark });
+  r.part(PRIM.sph(6, 5), { bone: 'head', pos: [0.13, 0.06, -0.14], scale: 0.06, color: PALETTE.emberDim, emit: 1.5, flat: false });
+  r.part(PRIM.sph(6, 5), { bone: 'head', pos: [-0.13, 0.06, -0.14], scale: 0.06, color: PALETTE.emberDim, emit: 1.5, flat: false });
 
   for (const [id] of legs) {
-    r.part(PRIM.box(), { bone: 'leg' + id, pos: [0, -0.28, 0], scale: [0.14, 0.58, 0.14], color: PALETTE.voidLite });
-    r.part(PRIM.oct(0), { bone: 'leg' + id, scale: 0.24, color: PALETTE.voidDark });
-    r.part(PRIM.oct(0), { bone: 'leg' + id + 'b', scale: 0.2, color: PALETTE.voidLite });
-    r.part(PRIM.box(), { bone: 'leg' + id + 'b', pos: [0, -0.28, 0], scale: [0.11, 0.56, 0.11], color: PALETTE.voidDark });
-    r.part(PRIM.spike(0.26, 0.08, 4), { bone: 'leg' + id + 'b', pos: [0, -0.6, 0], rot: [Math.PI, 0, 0], color: PALETTE.bone });
+    r.part(PRIM.cyl(5), { bone: 'leg' + id, pos: [0, -0.26, 0], scale: [0.14, 0.54, 0.14], color: PALETTE.hide });
+    r.part(PRIM.sph(6, 5), { bone: 'leg' + id, scale: 0.17, color: PALETTE.hide, flat: false });
+    r.part(PRIM.sph(6, 5), { bone: 'leg' + id + 'b', scale: 0.13, color: PALETTE.hideDark, flat: false });
+    r.part(PRIM.cyl(5), { bone: 'leg' + id + 'b', pos: [0, -0.28, 0], scale: [0.085, 0.56, 0.085], color: PALETTE.hideDark });
+    r.part(PRIM.sph(6, 5), { bone: 'leg' + id + 'b', pos: [0, -0.58, -0.04], scale: [0.12, 0.08, 0.15], color: PALETTE.hideDark, flat: false });
   }
 
   // diagonal gait: FL+BR swing together, FR+BL oppose
@@ -5103,7 +5306,7 @@ function buildRiggedSkitter() {
 }
 
 // ======================================================================
-//  DRONE — hovering gunnery platform
+//  BUZZARD — circling standoff attacker
 // ======================================================================
 function buildRiggedDrone() {
   const r = new RigBuilder();
@@ -5112,32 +5315,57 @@ function buildRiggedDrone() {
   r.addBone('ring', 'body');
   r.addBone('barrel', 'body', [0, -0.12, -0.72]);
   r.addBone('eye', 'body', [0, 0.02, -0.55]);
-  for (let i = 0; i < 3; i++) {
-    const a = (i / 3) * TAU + 0.5;
-    r.addBone('fin' + i, 'body', [Math.cos(a) * 0.78, -0.2, Math.sin(a) * 0.78], [0, -a, 0.4]);
-  }
+  // The three hover fins become two wings and a tail. Keeping the `fin0..2`
+  // names means every existing clip — the hover bob, the fire recoil, the
+  // death tumble — still drives them without being rewritten.
+  r.addBone('fin0', 'body', [0.5, 0.06, 0.1], [0, -0.18, 0.12]);   // left wing
+  r.addBone('fin1', 'body', [-0.5, 0.06, 0.1], [0, 0.18, -0.12]);  // right wing
+  r.addBone('fin2', 'body', [0, 0.0, 0.78], [0.25, 0, 0]);         // tail
 
-  r.part(PRIM.cyl(6), { bone: 'body', rot: [0, 0.5, 0], scale: [1.5, 0.42, 1.5], color: PALETTE.voidMid });
-  r.part(PRIM.cyl(6), { bone: 'body', pos: [0, 0.26, 0], rot: [0, 0.5, 0], scale: [0.95, 0.3, 0.95], color: PALETTE.voidDark });
-  r.part(PRIM.cyl(6), { bone: 'body', pos: [0, 0.44, 0], rot: [0, 0.5, 0], scale: [0.5, 0.16, 0.5], color: PALETTE.voidLite });
-  r.part(PRIM.tor(0.5, 0.07, 6, 18), { bone: 'ring', rot: [Math.PI / 2, 0, 0], scale: 2.05, color: PALETTE.magenta, emit: 2.6, flat: false });
-  for (let i = 0; i < 4; i++) {
-    const a = (i / 4) * TAU;
-    r.part(PRIM.box(), { bone: 'ring', pos: [Math.cos(a) * 1.02, 0, Math.sin(a) * 1.02], rot: [0, -a, 0], scale: [0.16, 0.1, 0.1], color: PALETTE.voidLite });
+  // Buzzard. Ragged, patient, and a nuisance from range — which is exactly the
+  // behaviour the archetype already had.
+  r.part(PRIM.sph(9, 7), { bone: 'body', scale: [0.38, 0.36, 0.72], color: PALETTE.feather, flat: false });
+  r.part(PRIM.sph(8, 6), { bone: 'body', pos: [0, 0.14, 0.1], scale: [0.32, 0.26, 0.5], color: PALETTE.featherDark, flat: false });
+  // bare neck and hooked head, the two things that say vulture and not hawk
+  r.part(PRIM.cyl(6), { bone: 'body', pos: [0, 0.1, -0.42], rot: [1.25, 0, 0], scale: [0.11, 0.36, 0.11], color: PALETTE.hideLite });
+  r.part(PRIM.sph(8, 6), { bone: 'eye', scale: [0.19, 0.18, 0.22], color: PALETTE.featherDark, flat: false });
+  r.part(PRIM.spike(0.3, 0.11, 5), { bone: 'eye', pos: [0, -0.02, -0.12], rot: [-Math.PI / 2, 0, 0], color: PALETTE.beak });
+  r.part(PRIM.sph(6, 5), { bone: 'eye', pos: [0.09, 0.06, -0.06], scale: 0.045, color: PALETTE.emberDim, emit: 1.4, flat: false });
+  r.part(PRIM.sph(6, 5), { bone: 'eye', pos: [-0.09, 0.06, -0.06], scale: 0.045, color: PALETTE.emberDim, emit: 1.4, flat: false });
+  // the ring bone still turns; it carries the ruff of feathers at the shoulders
+  for (let i = 0; i < 7; i++) {
+    const a = (i / 7) * TAU;
+    r.part(PRIM.wedge(0.22, 0.05, 0.3, 0.5), {
+      bone: 'ring', pos: [Math.cos(a) * 0.34, 0.16, Math.sin(a) * 0.34 - 0.1],
+      rot: [0.4, -a, 0], color: PALETTE.featherLite,
+    });
   }
-  r.part(PRIM.sph(10, 8), { bone: 'eye', scale: 0.44, color: PALETTE.magenta, emit: 3.4, flat: false });
-  r.part(PRIM.cyl(6), { bone: 'barrel', rot: [Math.PI / 2, 0, 0], scale: [0.16, 0.7, 0.16], color: PALETTE.voidLite });
-  r.part(PRIM.cyl(6), { bone: 'barrel', pos: [0, 0, -0.3], rot: [Math.PI / 2, 0, 0], scale: [0.1, 0.2, 0.1], color: PALETTE.magenta, emit: 3.0 });
-  for (let i = 0; i < 3; i++) {
-    r.part(PRIM.box(), { bone: 'fin' + i, pos: [0, -0.22, 0], scale: [0.1, 0.44, 0.1], color: PALETTE.voidLite });
-    r.part(PRIM.box(), { bone: 'fin' + i, pos: [0, -0.44, 0], scale: [0.16, 0.06, 0.16], color: PALETTE.magenta, emit: 1.8 });
+  // it spits, rather than shoots: the barrel is the throat
+  r.part(PRIM.cyl(6), { bone: 'barrel', rot: [Math.PI / 2, 0, 0], scale: [0.1, 0.3, 0.1], color: PALETTE.hideLite });
+  // wings: a spar with three graded primaries each, so they read at silhouette
+  for (const [i, sx] of [[0, 1], [1, -1]]) {
+    r.part(PRIM.box(), { bone: 'fin' + i, pos: [sx * 0.5, 0, 0], scale: [1.05, 0.07, 0.34], color: PALETTE.feather });
+    r.part(PRIM.wedge(0.5, 0.06, 0.62, 0.35), { bone: 'fin' + i, pos: [sx * 0.34, 0, 0.06], rot: [0, sx * 0.2, 0], color: PALETTE.featherDark });
+    for (let k = 0; k < 3; k++) {
+      r.part(PRIM.wedge(0.2, 0.045, 0.52 - k * 0.08, 0.6), {
+        bone: 'fin' + i, pos: [sx * (0.86 + k * 0.16), 0, 0.12 + k * 0.1],
+        rot: [0, sx * (0.3 + k * 0.14), 0], color: k === 1 ? PALETTE.featherLite : PALETTE.featherDark,
+      });
+    }
+  }
+  // tail fan
+  for (let k = -1; k <= 1; k++) {
+    r.part(PRIM.wedge(0.14, 0.05, 0.52, 0.7), { bone: 'fin2', pos: [k * 0.11, 0, 0.2], rot: [0, k * 0.22, 0], color: PALETTE.feather });
   }
 
   const clips = {
     hover: (() => {
       const c = new Clip('hover', 2.2);
       c.track('body', 'pos', [[0, 0, 0, 0], [1.1, 0, 0.1, 0], [2.2, 0, 0, 0]]);
-      for (let i = 0; i < 3; i++) c.swing('fin' + i, 'z', 0.22, i / 3);
+      // wings beat together and out of phase with the body bob; the tail only trims
+      c.swing('fin0', 'z', 0.30, 0);
+      c.swing('fin1', 'z', -0.30, 0);
+      c.swing('fin2', 'x', 0.10, 0.35);
       c.swing('body', 'x', 0.05, 0.3);
       return c;
     })(),
@@ -5154,7 +5382,7 @@ function buildRiggedDrone() {
 }
 
 // ======================================================================
-//  SPLITTER — unstable lattice
+//  POWDER KEG — rolling charge on a short fuse
 // ======================================================================
 function buildRiggedSplitter() {
   const r = new RigBuilder();
@@ -5162,15 +5390,33 @@ function buildRiggedSplitter() {
   r.addBone('core', 'root');
   for (let i = 0; i < 3; i++) r.addBone('shell' + i, 'root', [0, 0, 0], [i * 0.9, i * 1.4, i * 0.6]);
 
-  r.part(PRIM.sph(10, 8), { bone: 'core', scale: 0.9, color: PALETTE.violet, emit: 2.8, flat: false });
-  r.part(PRIM.ico(0), { bone: 'core', scale: 1.2, rot: [0.4, 0.3, 0], color: PALETTE.voidDark });
+  // A powder keg on a short fuse. It already wobbled, span and burst into two
+  // smaller things — which is a keg, not a lattice.
+  r.part(PRIM.cyl(10), { bone: 'core', scale: [1.0, 1.05, 1.0], color: PALETTE.kegWood });
+  r.part(PRIM.cyl(10), { bone: 'core', scale: [0.92, 1.12, 0.92], color: PALETTE.timberDark });
+  // staves, so it reads as coopered timber rather than a drum
+  for (let k = 0; k < 8; k++) {
+    const a = (k / 8) * TAU;
+    r.part(PRIM.box(), {
+      bone: 'core', pos: [Math.cos(a) * 0.48, 0, Math.sin(a) * 0.48], rot: [0, -a, 0],
+      scale: [0.06, 1.0, 0.16], color: k % 2 ? PALETTE.kegWood : PALETTE.timber,
+    });
+  }
+  // the fuse, lit — the one thing that has to glow, because it is the warning
+  r.part(PRIM.cyl(5), { bone: 'core', pos: [0, 0.62, 0], rot: [0.3, 0, 0.2], scale: [0.05, 0.34, 0.05], color: PALETTE.cloth });
+  r.part(PRIM.sph(6, 5), { bone: 'core', pos: [0.08, 0.8, 0.03], scale: 0.09, color: PALETTE.ember, emit: 3.4, flat: false });
+  // the three shell bones become the iron hoops; they still turn
   for (let i = 0; i < 3; i++) {
-    r.part(PRIM.ico(0), { bone: 'shell' + i, scale: [2.0, 0.5, 2.0], color: i === 0 ? PALETTE.voidMid : PALETTE.voidDark });
+    const y = -0.42 + i * 0.42;
+    r.part(PRIM.tor(0.5, 0.055, 5, 14), {
+      bone: 'shell' + i, pos: [0, y, 0], rot: [Math.PI / 2, 0, 0],
+      scale: i === 1 ? 1.08 : 1.0, color: PALETTE.kegBand, flat: false,
+    });
     for (let k = 0; k < 4; k++) {
       const a = (k / 4) * TAU + i;
       r.part(PRIM.box(), {
-        bone: 'shell' + i, pos: [Math.cos(a) * 0.72, 0, Math.sin(a) * 0.72], rot: [0, -a, 0],
-        scale: [0.8, 0.06, 0.06], color: PALETTE.violet, emit: 2.4,
+        bone: 'shell' + i, pos: [Math.cos(a) * 0.52, y, Math.sin(a) * 0.52], rot: [0, -a, 0],
+        scale: [0.09, 0.09, 0.09], color: PALETTE.iron,
       });
     }
   }
@@ -5197,7 +5443,7 @@ function buildRiggedSplitter() {
 }
 
 // ======================================================================
-//  SEEDER — artillery frame
+//  MORTAR CART — lobbed shells from a timber bed
 // ======================================================================
 function buildRiggedSeeder() {
   const r = new RigBuilder();
@@ -5213,18 +5459,31 @@ function buildRiggedSeeder() {
     r.addBone('leg' + i, 'hull', [Math.cos(a) * 0.95, -0.1, Math.sin(a) * 0.95], [0, -a, 0.35]);
   }
 
-  r.part(PRIM.cyl(8), { bone: 'hull', scale: [2.05, 0.4, 2.05], color: PALETTE.voidDark });
-  r.part(PRIM.sph(10, 6), { bone: 'dome', scale: [2.0, 1.1, 2.0], color: PALETTE.voidMid, flat: false });
-  r.part(PRIM.tor(0.5, 0.09, 6, 16), { bone: 'dome', pos: [0, 0.05, 0], rot: [Math.PI / 2, 0, 0], scale: 2.2, color: PALETTE.amber, emit: 2.4, flat: false });
-  r.part(PRIM.sph(8, 6), { bone: 'dome', pos: [0, 0.45, -0.9], scale: 0.34, color: PALETTE.amber, emit: 3.0, flat: false });
+  // A mortar cart: a timber bed, a canvas hood over the shells, and a cluster
+  // of stubby tubes. It lobbed shells before and it lobs shells now.
+  r.part(PRIM.box(), { bone: 'hull', scale: [2.0, 0.34, 2.5], color: PALETTE.timber });
+  r.part(PRIM.box(), { bone: 'hull', pos: [0, 0.2, 0], scale: [1.7, 0.24, 2.2], color: PALETTE.timberDark });
+  for (let i = 0; i < 4; i++) {
+    r.part(PRIM.box(), { bone: 'hull', pos: [0, 0.1, -1.0 + i * 0.66], scale: [2.1, 0.1, 0.12], color: PALETTE.iron });
+  }
+  r.part(PRIM.sph(10, 6), { bone: 'dome', scale: [1.5, 0.85, 1.7], color: PALETTE.cloth, flat: false });
+  r.part(PRIM.tor(0.5, 0.07, 6, 16), { bone: 'dome', pos: [0, 0.05, 0], rot: [Math.PI / 2, 0, 0], scale: 1.7, color: PALETTE.iron, flat: false });
+  // lantern on the driver's post: the tell that it is about to fire
+  r.part(PRIM.box(), { bone: 'dome', pos: [0, 0.3, -0.78], scale: [0.2, 0.26, 0.2], color: PALETTE.ironDark });
+  r.part(PRIM.sph(8, 6), { bone: 'dome', pos: [0, 0.3, -0.78], scale: 0.14, color: PALETTE.ember, emit: 3.0, flat: false });
   for (let i = 0; i < 3; i++) {
-    r.part(PRIM.cyl(6), { bone: 'barrel' + i, pos: [0, 0.3, 0], scale: [0.26, 0.9, 0.26], color: PALETTE.voidLite });
-    r.part(PRIM.cyl(6), { bone: 'barrel' + i, pos: [0, 0.78, 0], scale: [0.2, 0.14, 0.2], color: PALETTE.amber, emit: 3.2 });
-    r.part(PRIM.tor(0.5, 0.1, 5, 10), { bone: 'barrel' + i, pos: [0, 0.55, 0], rot: [Math.PI / 2, 0, 0], scale: 0.62, color: PALETTE.voidDark, flat: false });
+    r.part(PRIM.cyl(8), { bone: 'barrel' + i, pos: [0, 0.3, 0], scale: [0.28, 0.86, 0.28], color: PALETTE.gunmetal });
+    r.part(PRIM.tor(0.5, 0.09, 5, 12), { bone: 'barrel' + i, pos: [0, 0.68, 0], rot: [Math.PI / 2, 0, 0], scale: 0.7, color: PALETTE.brass, flat: false });
+    r.part(PRIM.tor(0.5, 0.1, 5, 10), { bone: 'barrel' + i, pos: [0, 0.4, 0], rot: [Math.PI / 2, 0, 0], scale: 0.66, color: PALETTE.ironDark, flat: false });
   }
   for (let i = 0; i < 4; i++) {
-    r.part(PRIM.box(), { bone: 'leg' + i, pos: [0, -0.24, 0], scale: [0.16, 0.5, 0.16], color: PALETTE.voidLite });
-    r.part(PRIM.box(), { bone: 'leg' + i, pos: [0, -0.5, 0], scale: [0.3, 0.1, 0.3], color: PALETTE.voidMid });
+    // the four legs become the wheels and their axle stubs
+    r.part(PRIM.cyl(6), { bone: 'leg' + i, pos: [0, -0.2, 0], scale: [0.12, 0.4, 0.12], color: PALETTE.iron });
+    r.part(PRIM.tor(0.5, 0.1, 6, 14), { bone: 'leg' + i, pos: [0, -0.5, 0], rot: [0, Math.PI / 2, 0], scale: 1.1, color: PALETTE.timberDark, flat: false });
+    for (let k = 0; k < 5; k++) {
+      const a = (k / 5) * Math.PI;
+      r.part(PRIM.box(), { bone: 'leg' + i, pos: [0, -0.5, 0], rot: [a, Math.PI / 2, 0], scale: [0.05, 1.02, 0.05], color: PALETTE.timber });
+    }
   }
 
   const clips = {
@@ -5250,7 +5509,7 @@ function buildRiggedSeeder() {
 }
 
 // ======================================================================
-//  LANCER — armoured ram
+//  LONGHORN — winds up, then charges
 // ======================================================================
 function buildRiggedLancer() {
   const r = new RigBuilder();
@@ -5265,24 +5524,44 @@ function buildRiggedLancer() {
   r.addBone('boostL', 'body', [0.45, 0, 1.5]);
   r.addBone('boostR', 'body', [-0.45, 0, 1.5]);
 
-  r.part(PRIM.wedge(1.7, 0.95, 3.1, 0.2), { bone: 'body', color: PALETTE.voidMid });
-  r.part(PRIM.wedge(1.15, 0.5, 2.0, 0.35), { bone: 'body', pos: [0, 0.5, -0.3], color: PALETTE.voidDark });
-  for (let i = 0; i < 3; i++) {
-    r.part(PRIM.box(), { bone: 'body', pos: [0, 0.76, -0.6 + i * 0.5], scale: [0.9 - i * 0.15, 0.06, 0.14], color: PALETTE.voidLite });
+  // A longhorn. The archetype winds up and crosses the arena in a heartbeat,
+  // which is a charging steer with a different set of words on it.
+  r.part(PRIM.sph(10, 8), { bone: 'body', scale: [0.82, 0.76, 1.72], color: PALETTE.steerHide, flat: false });
+  // rump, and the shoulder hump that gives a steer its profile
+  r.part(PRIM.sph(9, 7), { bone: 'body', pos: [0, 0.16, 0.72], scale: [0.74, 0.7, 0.66], color: PALETTE.steerHideDark, flat: false });
+  r.part(PRIM.sph(8, 6), { bone: 'body', pos: [0, 0.52, -0.42], scale: [0.56, 0.36, 0.72], color: PALETTE.steerHideDark, flat: false });
+  // neck, running down to the skull on the horn bone
+  r.part(PRIM.cyl(7), { bone: 'body', pos: [0, 0.24, -1.0], rot: [1.35, 0, 0], scale: [0.4, 0.85, 0.44], color: PALETTE.steerHide });
+  // skull and muzzle on the forward horn bone
+  r.part(PRIM.sph(9, 7), { bone: 'horn', pos: [0, 0.1, 0.5], scale: [0.42, 0.42, 0.55], color: PALETTE.steerHide, flat: false });
+  r.part(PRIM.sph(8, 6), { bone: 'horn', pos: [0, -0.02, 0.06], scale: [0.3, 0.26, 0.34], color: PALETTE.steerHideDark, flat: false });
+  r.part(PRIM.sph(6, 5), { bone: 'horn', pos: [0.11, 0.02, -0.1], scale: 0.07, color: PALETTE.ironDark, flat: false });
+  r.part(PRIM.sph(6, 5), { bone: 'horn', pos: [-0.11, 0.02, -0.1], scale: 0.07, color: PALETTE.ironDark, flat: false });
+  // The horns are the whole silhouette, so they are big and they sweep: out
+  // hard to the side, then forward, then up to a point.
+  //
+  // A spike points along +Y unrotated, and rotating +Y about Z by θ gives
+  // (-sinθ, cosθ, 0) — so a *positive* θ swings it toward -X. The left horn
+  // therefore needs a negative angle, which is the opposite of what reads
+  // naturally and is why they came out crossed the first time.
+  for (const [bone, sx] of [['hornL', 1], ['hornR', -1]]) {
+    r.part(PRIM.spike(0.8, 0.22, 6), { bone, pos: [sx * 0.1, 0.16, 0.04], rot: [0, 0, -sx * (Math.PI / 2 - 0.2)], color: PALETTE.bone });
+    r.part(PRIM.spike(0.66, 0.15, 6), { bone, pos: [sx * 0.86, 0.3, -0.06], rot: [0.45, 0, -sx * (Math.PI / 2 - 0.55)], color: PALETTE.bone });
+    r.part(PRIM.spike(0.5, 0.1, 5), { bone, pos: [sx * 1.3, 0.56, -0.4], rot: [1.0, 0, -sx * 0.8], color: PALETTE.hideLite });
   }
-  r.part(PRIM.spike(1.5, 0.22, 4), { bone: 'horn', rot: [-Math.PI / 2, 0, Math.PI / 4], color: PALETTE.bone });
-  r.part(PRIM.spike(1.0, 0.16, 4), { bone: 'hornL', rot: [-Math.PI / 2, 0, 0.3], color: PALETTE.bone });
-  r.part(PRIM.spike(1.0, 0.16, 4), { bone: 'hornR', rot: [-Math.PI / 2, 0, -0.3], color: PALETTE.bone });
-  r.part(PRIM.sph(10, 8), { bone: 'eye', scale: 0.42, color: PALETTE.amber, emit: 3.2, flat: false });
-  r.part(PRIM.box(), { bone: 'body', pos: [0.85, -0.05, 0.35], scale: [0.16, 0.7, 1.5], color: PALETTE.voidLite });
-  r.part(PRIM.box(), { bone: 'body', pos: [-0.85, -0.05, 0.35], scale: [0.16, 0.7, 1.5], color: PALETTE.voidLite });
+  // a warning glint, kept small — it is the charge tell at distance
+  r.part(PRIM.sph(8, 6), { bone: 'eye', pos: [0, -0.16, 0.2], scale: 0.14, color: PALETTE.emberDim, emit: 2.0, flat: false });
+  // flanks
+  r.part(PRIM.sph(8, 6), { bone: 'body', pos: [0.62, -0.1, 0.2], scale: [0.26, 0.55, 0.9], color: PALETTE.steerHideDark, flat: false });
+  r.part(PRIM.sph(8, 6), { bone: 'body', pos: [-0.62, -0.1, 0.2], scale: [0.26, 0.55, 0.9], color: PALETTE.steerHideDark, flat: false });
   for (const bone of ['boostL', 'boostR']) {
-    r.part(PRIM.cyl(6), { bone, rot: [Math.PI / 2, 0, 0], scale: [0.42, 0.7, 0.42], color: PALETTE.voidDark });
-    r.part(PRIM.cyl(6), { bone, pos: [0, 0, 0.32], rot: [Math.PI / 2, 0, 0], scale: [0.3, 0.16, 0.3], color: PALETTE.amber, emit: 3.4 });
+    // the boosters become the haunches, and the dust they kick up
+    r.part(PRIM.sph(8, 6), { bone, scale: [0.44, 0.52, 0.6], color: PALETTE.steerHide, flat: false });
+    r.part(PRIM.cyl(5), { bone, pos: [0, -0.1, 0.3], rot: [1.3, 0, 0], scale: [0.08, 0.5, 0.08], color: PALETTE.mane });
   }
   for (const [id] of legs) {
-    r.part(PRIM.box(), { bone: 'leg' + id, pos: [0, -0.3, 0], scale: [0.16, 0.66, 0.16], color: PALETTE.voidLite });
-    r.part(PRIM.box(), { bone: 'leg' + id, pos: [0, -0.62, 0], scale: [0.3, 0.12, 0.4], color: PALETTE.voidMid });
+    r.part(PRIM.cyl(6), { bone: 'leg' + id, pos: [0, -0.3, 0], scale: [0.17, 0.66, 0.17], color: PALETTE.steerHide });
+    r.part(PRIM.cyl(6), { bone: 'leg' + id, pos: [0, -0.64, 0], scale: [0.2, 0.16, 0.24], color: PALETTE.ironDark });
   }
 
   const clips = {
@@ -5324,7 +5603,7 @@ function buildRiggedLancer() {
 }
 
 // ======================================================================
-//  SENTINEL — siege tripod
+//  GATLING WALKER — a boiler on jointed legs
 // ======================================================================
 function buildRiggedSentinel() {
   const r = new RigBuilder();
@@ -5338,18 +5617,40 @@ function buildRiggedSentinel() {
     r.addBone('leg' + i + 'b', 'leg' + i, [0, -0.95, 0], [0, 0, -0.95]);
   }
 
-  r.part(PRIM.wedge(1.5, 1.35, 2.1, 0.45), { bone: 'hip', color: PALETTE.voidMid });
-  r.part(PRIM.cyl(8), { bone: 'hip', pos: [0, 0.6, 0], scale: [1.0, 0.3, 1.0], color: PALETTE.voidLite });
-  r.part(PRIM.box(), { bone: 'head', scale: [1.05, 0.42, 1.05], color: PALETTE.voidDark });
-  r.part(PRIM.box(), { bone: 'head', pos: [0, 0.26, 0.2], scale: [0.08, 0.08, 1.4], color: PALETTE.magenta, emit: 2.4 });
-  r.part(PRIM.cyl(8), { bone: 'emitter', rot: [Math.PI / 2, 0, 0], scale: [0.5, 1.0, 0.5], color: PALETTE.voidLite });
-  r.part(PRIM.tor(0.5, 0.1, 6, 14), { bone: 'emitter', pos: [0, 0, -0.4], scale: 1.1, color: PALETTE.magenta, emit: 2.8, flat: false });
-  r.part(PRIM.sph(10, 8), { bone: 'emitter', pos: [0, 0, -0.52], scale: 0.5, color: 0xff6ec7, emit: 3.4, flat: false });
+  // A gun platform walked out on jointed iron legs: a boiler, a stack, and a
+  // Gatling. Weird-west by way of materials — riveted plate, brass and timber —
+  // rather than by silhouette, because the archetype has to stay a tall
+  // slow-moving thing that paints a line and then deletes it.
+  r.part(PRIM.cyl(10), { bone: 'hip', rot: [Math.PI / 2, 0, 0], scale: [1.15, 1.9, 1.15], color: PALETTE.iron });
+  r.part(PRIM.cyl(10), { bone: 'hip', pos: [0, 0, 0.5], rot: [Math.PI / 2, 0, 0], scale: [1.2, 0.4, 1.2], color: PALETTE.ironDark });
+  // rivet bands around the boiler
+  for (let k = 0; k < 3; k++) {
+    r.part(PRIM.tor(0.5, 0.07, 6, 16), { bone: 'hip', pos: [0, 0, -0.6 + k * 0.6], scale: 1.28, color: PALETTE.ironDark, flat: false });
+  }
+  // firebox glow underneath — the weak point, and the only lit part
+  r.part(PRIM.box(), { bone: 'hip', pos: [0, -0.5, -0.3], scale: [0.5, 0.3, 0.5], color: PALETTE.ironDark });
+  r.part(PRIM.sph(8, 6), { bone: 'hip', pos: [0, -0.58, -0.3], scale: [0.3, 0.16, 0.3], color: PALETTE.ember, emit: 2.6, flat: false });
+  // stack
+  r.part(PRIM.cyl(8), { bone: 'hip', pos: [0.4, 0.85, 0.5], scale: [0.24, 1.0, 0.24], color: PALETTE.ironDark });
+  r.part(PRIM.cyl(8), { bone: 'hip', pos: [0.4, 1.4, 0.5], scale: [0.36, 0.2, 0.36], color: PALETTE.iron });
+  // gun mount
+  r.part(PRIM.box(), { bone: 'head', scale: [1.0, 0.46, 0.9], color: PALETTE.gunmetal });
+  r.part(PRIM.box(), { bone: 'head', pos: [0, 0.3, 0.1], scale: [0.7, 0.2, 0.6], color: PALETTE.timberDark });
+  // Gatling: a ring of barrels around a brass hub
+  r.part(PRIM.cyl(8), { bone: 'emitter', rot: [Math.PI / 2, 0, 0], scale: [0.34, 0.9, 0.34], color: PALETTE.brass });
+  for (let k = 0; k < 6; k++) {
+    const a = (k / 6) * TAU;
+    r.part(PRIM.cyl(6), {
+      bone: 'emitter', pos: [Math.cos(a) * 0.26, Math.sin(a) * 0.26, -0.1],
+      rot: [Math.PI / 2, 0, 0], scale: [0.09, 1.1, 0.09], color: PALETTE.gunmetal,
+    });
+  }
+  r.part(PRIM.tor(0.5, 0.09, 6, 14), { bone: 'emitter', pos: [0, 0, -0.4], scale: 0.9, color: PALETTE.ironDark, flat: false });
   for (let i = 0; i < 3; i++) {
-    r.part(PRIM.box(), { bone: 'leg' + i, pos: [0, -0.48, 0], scale: [0.24, 0.98, 0.24], color: PALETTE.voidLite });
-    r.part(PRIM.oct(0), { bone: 'leg' + i, scale: 0.34, color: PALETTE.voidDark });
-    r.part(PRIM.box(), { bone: 'leg' + i + 'b', pos: [0, -0.4, 0], scale: [0.2, 0.82, 0.2], color: PALETTE.voidDark });
-    r.part(PRIM.box(), { bone: 'leg' + i + 'b', pos: [0, -0.82, 0], scale: [0.42, 0.14, 0.42], color: PALETTE.voidMid });
+    r.part(PRIM.cyl(6), { bone: 'leg' + i, pos: [0, -0.48, 0], scale: [0.2, 0.98, 0.2], color: PALETTE.iron });
+    r.part(PRIM.sph(7, 6), { bone: 'leg' + i, scale: 0.26, color: PALETTE.brass, flat: false });
+    r.part(PRIM.cyl(6), { bone: 'leg' + i + 'b', pos: [0, -0.4, 0], scale: [0.16, 0.82, 0.16], color: PALETTE.ironDark });
+    r.part(PRIM.box(), { bone: 'leg' + i + 'b', pos: [0, -0.84, 0], scale: [0.38, 0.16, 0.46], color: PALETTE.gunmetal });
   }
 
   const clips = {
@@ -5399,7 +5700,7 @@ const RIGGED_ENEMIES = {
 //  BOSSES — one draw call each, fully articulated
 // ======================================================================
 
-/** THE WARDEN — orbital plate ring around a caged core. */
+/** THE WAGON FORT — a turning ring of wagons around a strongbox. */
 function buildRiggedWarden() {
   const r = new RigBuilder();
   r.addBone('root');
@@ -5413,34 +5714,60 @@ function buildRiggedWarden() {
   r.addBone('turretL', 'root', [4.4, -1.6, 0], [0, Math.PI / 2, 0]);
   r.addBone('turretR', 'root', [-4.4, -1.6, 0], [0, -Math.PI / 2, 0]);
 
-  r.part(PRIM.oct(0), { bone: 'core', scale: 4.4, color: PALETTE.voidMid });
-  r.part(PRIM.oct(0), { bone: 'core', scale: 3.0, rot: [0.4, 0.4, 0], color: PALETTE.voidDark });
-  r.part(PRIM.sph(12, 10), { bone: 'core', scale: 2.2, color: PALETTE.magenta, emit: 2.6, flat: false });
+  // THE WAGON FORT. The bones already described a hovering core inside a
+  // turning ring of plates with two turrets — which is a circle of wagons with
+  // a strongbox in the middle, drawn by nobody and holding its ground.
+  r.part(PRIM.box(), { bone: 'core', scale: [4.6, 3.4, 5.4], color: PALETTE.timber });
+  r.part(PRIM.box(), { bone: 'core', pos: [0, 1.9, 0], scale: [4.2, 0.7, 5.0], color: PALETTE.timberDark });
+  // iron banding on the strongbox
+  for (let i = 0; i < 3; i++) {
+    r.part(PRIM.box(), { bone: 'core', pos: [0, -1.2 + i * 1.3, 0], scale: [4.8, 0.28, 5.6], color: PALETTE.ironDark });
+  }
+  r.part(PRIM.box(), { bone: 'core', pos: [0, 0.4, -2.75], scale: [1.6, 1.6, 0.3], color: PALETTE.brass });
+  // strongbox lock: the weak point, and it glows because it has to be found
+  r.part(PRIM.sph(10, 8), { bone: 'core', pos: [0, 0.4, -2.95], scale: 0.55, color: PALETTE.ember, emit: 2.8, flat: false });
+  // rifle barrels bristling over the top
   for (let i = 0; i < 6; i++) {
     const a = (i / 6) * TAU;
-    r.part(PRIM.spike(1.6, 0.24, 4), {
-      bone: 'core', pos: [Math.cos(a) * 2.1, 0.4, Math.sin(a) * 2.1],
-      rot: [Math.PI / 2, 0, -a + Math.PI / 2], color: PALETTE.bone,
+    r.part(PRIM.cyl(6), {
+      bone: 'core', pos: [Math.cos(a) * 2.0, 2.2, Math.sin(a) * 2.0],
+      rot: [Math.PI / 2, -a + Math.PI / 2, 0], scale: [0.16, 2.4, 0.16], color: PALETTE.gunmetal,
     });
   }
-  r.part(PRIM.tor(0.5, 0.06, 6, 24), { bone: 'halo', rot: [Math.PI / 2, 0, 0], scale: 6.4, color: PALETTE.magenta, emit: 2.2, flat: false });
-  r.part(PRIM.tor(0.5, 0.04, 6, 20), { bone: 'halo', rot: [0, 0, Math.PI / 2], scale: 5.6, color: 0xff8ad0, emit: 2.0, flat: false });
+  // dust thrown up as it turns, in place of the old energy halo
+  r.part(PRIM.tor(0.5, 0.09, 6, 24), { bone: 'halo', rot: [Math.PI / 2, 0, 0], scale: 6.4, color: PALETTE.sand, flat: false });
+  r.part(PRIM.tor(0.5, 0.06, 6, 20), { bone: 'halo', rot: [Math.PI / 2, 0, 0], scale: 5.4, color: PALETTE.dirt, flat: false });
 
-  r.part(PRIM.tor(0.5, 0.055, 8, 32), { bone: 'ring', rot: [Math.PI / 2, 0, 0], scale: 11.2, color: PALETTE.voidLite, flat: false });
+  // the ring: a rope line strung between the wagons
+  r.part(PRIM.tor(0.5, 0.045, 8, 32), { bone: 'ring', rot: [Math.PI / 2, 0, 0], scale: 11.2, color: PALETTE.cloth, flat: false });
   for (let i = 0; i < 8; i++) {
     const a = (i / 8) * TAU;
-    r.part(PRIM.wedge(0.9, 0.5, 1.6, 0.4), { bone: 'ring', pos: [Math.cos(a) * 5.6, 0, Math.sin(a) * 5.6], rot: [0, -a + Math.PI / 2, 0], color: PALETTE.voidMid });
-    r.part(PRIM.box(), { bone: 'ring', pos: [Math.cos(a) * 6.1, 0, Math.sin(a) * 6.1], rot: [0, -a, 0], scale: [0.5, 0.1, 0.1], color: PALETTE.magenta, emit: 2.8 });
+    // hitching posts with a lantern on each
+    r.part(PRIM.cyl(6), { bone: 'ring', pos: [Math.cos(a) * 5.6, 0.5, Math.sin(a) * 5.6], scale: [0.2, 1.8, 0.2], color: PALETTE.timberDark });
+    r.part(PRIM.sph(8, 6), { bone: 'ring', pos: [Math.cos(a) * 5.6, 1.5, Math.sin(a) * 5.6], scale: 0.3, color: PALETTE.ember, emit: 2.2, flat: false });
   }
+  // four wagons, one per plate bone
   for (let i = 0; i < 4; i++) {
-    r.part(PRIM.wedge(2.2, 0.55, 3.0, 0.5), { bone: 'plate' + i, color: PALETTE.voidMid });
-    r.part(PRIM.box(), { bone: 'plate' + i, pos: [0, 0.34, 0], scale: [1.4, 0.1, 2.0], color: PALETTE.cyan, emit: 2.4 });
-    r.part(PRIM.oct(0), { bone: 'plate' + i, pos: [0, 0.3, -1.2], scale: 0.7, color: PALETTE.cyan, emit: 2.8 });
+    r.part(PRIM.box(), { bone: 'plate' + i, scale: [2.4, 1.0, 3.4], color: PALETTE.timber });
+    r.part(PRIM.box(), { bone: 'plate' + i, pos: [0, 0.7, 0], scale: [2.2, 0.5, 3.2], color: PALETTE.timberDark });
+    // canvas tilt over the bed
+    r.part(PRIM.cyl(8), { bone: 'plate' + i, pos: [0, 1.1, 0], rot: [Math.PI / 2, 0, 0], scale: [1.15, 3.0, 1.15], color: PALETTE.cloth });
+    for (const sx of [1, -1]) {
+      r.part(PRIM.tor(0.5, 0.12, 6, 14), { bone: 'plate' + i, pos: [sx * 1.25, -0.5, 1.0], rot: [0, Math.PI / 2, 0], scale: 2.0, color: PALETTE.timberDark, flat: false });
+      r.part(PRIM.tor(0.5, 0.12, 6, 14), { bone: 'plate' + i, pos: [sx * 1.25, -0.5, -1.0], rot: [0, Math.PI / 2, 0], scale: 2.0, color: PALETTE.timberDark, flat: false });
+    }
   }
+  // two Gatlings on the flanks
   for (const bone of ['turretL', 'turretR']) {
-    r.part(PRIM.cyl(6), { bone, rot: [Math.PI / 2, 0, 0], scale: [0.6, 1.8, 0.6], color: PALETTE.voidDark });
-    r.part(PRIM.sph(8, 6), { bone, pos: [0, 0, -1.0], scale: 0.6, color: PALETTE.magenta, emit: 3.4, flat: false });
-    r.part(PRIM.tor(0.5, 0.12, 5, 10), { bone, pos: [0, 0, -0.7], scale: 1.0, color: PALETTE.voidLite, flat: false });
+    r.part(PRIM.box(), { bone, scale: [1.0, 0.9, 1.4], color: PALETTE.ironDark });
+    r.part(PRIM.cyl(8), { bone, pos: [0, 0.2, -0.9], rot: [Math.PI / 2, 0, 0], scale: [0.42, 1.9, 0.42], color: PALETTE.brass });
+    for (let k = 0; k < 6; k++) {
+      const a = (k / 6) * TAU;
+      r.part(PRIM.cyl(6), {
+        bone, pos: [Math.cos(a) * 0.3, 0.2 + Math.sin(a) * 0.3, -1.0],
+        rot: [Math.PI / 2, 0, 0], scale: [0.1, 2.0, 0.1], color: PALETTE.gunmetal,
+      });
+    }
   }
 
   const clips = {
@@ -5496,7 +5823,7 @@ function buildRiggedWarden() {
   return pack(r, clips, 'warden', { radius: 6.4 });
 }
 
-/** THE HARROWER — bladed hull with sweeping beam arms and a segmented tail. */
+/** THE IRON HORSE — a locomotive: cowcatcher, side rods, and carriages behind. */
 function buildRiggedHarrower() {
   const r = new RigBuilder();
   r.addBone('root');
@@ -5509,26 +5836,52 @@ function buildRiggedHarrower() {
   r.addBone('tail2', 'tail1', [0, 0, 1.15]);
   r.addBone('tail3', 'tail2', [0, 0, 1.15]);
 
-  r.part(PRIM.wedge(4.0, 2.4, 9.0, 0.25), { bone: 'core', color: PALETTE.voidMid });
-  r.part(PRIM.wedge(2.6, 1.2, 6.0, 0.4), { bone: 'core', pos: [0, 1.2, -0.6], color: PALETTE.voidDark });
-  r.part(PRIM.sph(12, 10), { bone: 'core', pos: [0, 0.9, -2.6], scale: 1.7, color: 0xff5ab0, emit: 3.2, flat: false });
-  r.part(PRIM.box(), { bone: 'core', pos: [0, 1.75, 0], scale: [0.12, 0.12, 6.5], color: PALETTE.magenta, emit: 2.6 });
-  for (let i = 0; i < 3; i++) {
-    r.part(PRIM.box(), { bone: 'core', pos: [0, 1.5, -2.2 + i * 1.6], scale: [1.8 - i * 0.3, 0.08, 0.2], color: PALETTE.voidLite });
-  }
-  r.part(PRIM.spike(3.0, 0.5, 5), { bone: 'spear', rot: [-Math.PI / 2, 0, 0], color: PALETTE.bone });
-  r.part(PRIM.tor(0.5, 0.14, 5, 10), { bone: 'spear', pos: [0, 0, 1.0], scale: 1.1, color: PALETTE.magenta, emit: 2.4, flat: false });
-
-  for (const [bone, s] of [['armL', 1], ['armR', -1]]) {
-    r.part(PRIM.box(), { bone, pos: [0, 0, 1.6], scale: [0.7, 0.5, 4.4], color: PALETTE.voidMid });
-    r.part(PRIM.cyl(6), { bone, pos: [0, 0, -0.9], rot: [Math.PI / 2, 0, 0], scale: [1.0, 1.6, 1.0], color: PALETTE.voidDark });
-    r.part(PRIM.tor(0.5, 0.1, 6, 16), { bone, pos: [0, 0, -1.7], scale: 2.0, color: PALETTE.magenta, emit: 3.0, flat: false });
-    r.part(PRIM.sph(10, 8), { bone, pos: [0, 0, -1.85], scale: 0.8, color: 0xffa8d8, emit: 3.6, flat: false });
-    r.part(PRIM.wedge(0.4, 1.2, 2.4, 0.4), { bone, pos: [s * 0.5, 0.5, 1.2], rot: [0, 0, -s * 0.3], color: PALETTE.voidLite });
-  }
+  // THE IRON HORSE. A long body with a spear out front, two side arms and a
+  // four-segment tail behind it — a locomotive with a cowcatcher, side rods
+  // and a string of carriages, and it was already the boss that charges.
+  r.part(PRIM.cyl(10), { bone: 'core', rot: [Math.PI / 2, 0, 0], scale: [2.1, 8.4, 2.1], color: PALETTE.iron });
+  r.part(PRIM.cyl(10), { bone: 'core', pos: [0, 0, -2.4], rot: [Math.PI / 2, 0, 0], scale: [2.35, 1.4, 2.35], color: PALETTE.ironDark });
+  // boiler bands
   for (let i = 0; i < 4; i++) {
-    r.part(PRIM.wedge(2.6 - i * 0.5, 0.9, 1.15, 0.7), { bone: 'tail' + i, color: i % 2 ? PALETTE.voidDark : PALETTE.voidLite });
-    r.part(PRIM.box(), { bone: 'tail' + i, pos: [0, 0.5, 0], scale: [0.9 - i * 0.16, 0.06, 0.5], color: PALETTE.magenta, emit: 2.0 });
+    r.part(PRIM.tor(0.5, 0.1, 6, 20), { bone: 'core', pos: [0, 0, -1.6 + i * 1.7], rot: [0, 0, 0], scale: 4.6, color: PALETTE.ironDark, flat: false });
+  }
+  // cab at the back, timber and iron
+  r.part(PRIM.box(), { bone: 'core', pos: [0, 1.5, 2.9], scale: [3.4, 3.0, 2.6], color: PALETTE.timberDark });
+  r.part(PRIM.box(), { bone: 'core', pos: [0, 3.1, 2.9], scale: [3.8, 0.35, 3.0], color: PALETTE.iron });
+  // smokestack and the firebox glare through the grate
+  r.part(PRIM.cyl(8), { bone: 'core', pos: [0, 2.6, -2.6], scale: [0.55, 2.0, 0.55], color: PALETTE.ironDark });
+  r.part(PRIM.cyl(8), { bone: 'core', pos: [0, 3.7, -2.6], scale: [0.95, 0.5, 0.95], color: PALETTE.gunmetal });
+  r.part(PRIM.sph(12, 10), { bone: 'core', pos: [0, -0.3, -3.2], scale: [1.3, 1.1, 0.6], color: PALETTE.ember, emit: 2.8, flat: false });
+  // headlamp
+  r.part(PRIM.cyl(8), { bone: 'core', pos: [0, 1.6, -3.9], rot: [Math.PI / 2, 0, 0], scale: [0.55, 0.7, 0.55], color: PALETTE.brass });
+  r.part(PRIM.sph(10, 8), { bone: 'core', pos: [0, 1.6, -4.2], scale: 0.42, color: 0xffe6a8, emit: 3.4, flat: false });
+
+  // cowcatcher
+  r.part(PRIM.wedge(3.4, 1.8, 2.4, 0.15), { bone: 'spear', pos: [0, -0.4, 0.8], color: PALETTE.ironDark });
+  for (let k = -3; k <= 3; k++) {
+    r.part(PRIM.box(), { bone: 'spear', pos: [k * 0.42, -0.4, 0.4], rot: [0.5, 0, 0], scale: [0.12, 2.4, 0.12], color: PALETTE.iron });
+  }
+
+  // side rods and driving wheels
+  for (const [bone, s] of [['armL', 1], ['armR', -1]]) {
+    r.part(PRIM.box(), { bone, pos: [0, 0, 1.6], scale: [0.5, 0.4, 5.6], color: PALETTE.gunmetal });
+    r.part(PRIM.cyl(6), { bone, pos: [0, 0, -0.9], rot: [Math.PI / 2, 0, 0], scale: [1.0, 1.6, 1.0], color: PALETTE.ironDark });
+    for (const z of [-1.2, 1.0, 3.0]) {
+      r.part(PRIM.tor(0.5, 0.16, 6, 16), { bone, pos: [0, -0.5, z], rot: [0, Math.PI / 2, 0], scale: 3.0, color: PALETTE.ironDark, flat: false });
+      for (let k = 0; k < 4; k++) {
+        r.part(PRIM.box(), { bone, pos: [0, -0.5, z], rot: [(k / 4) * Math.PI, Math.PI / 2, 0], scale: [0.13, 2.8, 0.13], color: PALETTE.iron });
+      }
+    }
+    r.part(PRIM.box(), { bone, pos: [s * 0.35, 0.7, 1.2], scale: [0.3, 1.4, 2.4], color: PALETTE.iron });
+  }
+  // carriages
+  for (let i = 0; i < 4; i++) {
+    r.part(PRIM.box(), { bone: 'tail' + i, scale: [2.9 - i * 0.28, 1.9, 1.1], color: i % 2 ? PALETTE.timberDark : PALETTE.timber });
+    r.part(PRIM.box(), { bone: 'tail' + i, pos: [0, 1.05, 0], scale: [3.1 - i * 0.28, 0.22, 1.2], color: PALETTE.iron });
+    for (const sx of [1, -1]) {
+      r.part(PRIM.tor(0.5, 0.12, 6, 12), { bone: 'tail' + i, pos: [sx * (1.4 - i * 0.14), -0.9, 0], rot: [0, Math.PI / 2, 0], scale: 1.5, color: PALETTE.ironDark, flat: false });
+    }
+    r.part(PRIM.sph(8, 6), { bone: 'tail' + i, pos: [0, 0.4, -0.6], scale: 0.24, color: PALETTE.ember, emit: 1.8, flat: false });
   }
 
   const clips = {
@@ -5569,7 +5922,7 @@ function buildRiggedHarrower() {
   return pack(r, clips, 'harrower', { radius: 5.4 });
 }
 
-/** THE VOID MAW — a spiked sphere that opens on a vulnerable eye. */
+/** THE RATTLER — a coiled body that opens on a vulnerable eye. */
 function buildRiggedMaw() {
   const r = new RigBuilder();
   r.addBone('root');
@@ -5579,40 +5932,50 @@ function buildRiggedMaw() {
   r.addBone('jawB', 'root', [0, -2.6, -3.4]);
   r.addBone('eye', 'root', [0, 0, -4.2]);
 
-  r.part(PRIM.ico(1), { bone: 'core', scale: 8.0, color: PALETTE.voidMid });
-  r.part(PRIM.ico(0), { bone: 'core', scale: 6.6, rot: [0.5, 0.3, 0.2], color: PALETTE.voidLite });
-  for (let i = 0; i < 8; i++) {
-    const a = (i / 8) * TAU;
+  // THE RATTLER. A coiled body, a hinged jaw and one eye — which was already
+  // what the bones described, once the neon came off it.
+  r.part(PRIM.sph(16, 12), { bone: 'core', scale: [4.4, 3.6, 4.6], color: PALETTE.hideDark, flat: false });
+  // banded scales down the coil
+  for (let i = 0; i < 9; i++) {
+    const t = i / 8;
+    const rr = 4.2 * Math.sin(0.35 + t * 2.4);
+    r.part(PRIM.tor(0.5, 0.16, 6, 20), {
+      bone: 'core', pos: [0, -2.6 + t * 5.4, 0], rot: [Math.PI / 2, 0, 0],
+      scale: rr * 2.0, color: i % 2 ? PALETTE.hide : PALETTE.hideDark, flat: false,
+    });
+  }
+  // belly plates, paler, the way a snake's underside is
+  for (let i = 0; i < 10; i++) {
+    const a = (i / 10) * TAU;
     r.part(PRIM.box(), {
-      bone: 'core', pos: [Math.cos(a) * 3.6, Math.sin(i * 1.7) * 2.6, Math.sin(a) * 3.6],
-      rot: [0, -a, 0.4], scale: [2.6, 0.12, 0.12], color: PALETTE.magenta, emit: 2.6,
+      bone: 'core', pos: [Math.cos(a) * 3.9, -1.6, Math.sin(a) * 3.9],
+      rot: [0, -a, 0.2], scale: [0.9, 0.16, 1.5], color: PALETTE.hideLite,
     });
   }
-  r.part(PRIM.sph(16, 12), { bone: 'core', scale: 4.6, color: 0xff2f8f, emit: 2.4, flat: false });
-  for (let i = 0; i < 14; i++) {
-    const a = (i / 14) * TAU;
-    const y = Math.sin(i * 2.4) * 2.4;
-    const rr = Math.sqrt(Math.max(0.1, 16 - y * y * 0.6));
-    r.part(PRIM.spike(2.4, 0.34, 4), {
-      bone: 'core', pos: [Math.cos(a) * rr, y, Math.sin(a) * rr],
-      rot: [Math.PI / 2 - Math.atan2(y, rr) * 0.6, -a, 0],
-      color: i % 3 === 0 ? PALETTE.bone : PALETTE.voidLite,
-    });
-  }
-  r.part(PRIM.tor(0.5, 0.05, 6, 30), { bone: 'ring', rot: [Math.PI / 2, 0, 0], scale: 13.0, color: PALETTE.violet, emit: 2.2, flat: false });
+  // the rattle, on the turning ring — it is the telegraph, so it is the loud part
+  r.part(PRIM.tor(0.5, 0.06, 6, 30), { bone: 'ring', rot: [Math.PI / 2, 0, 0], scale: 13.0, color: PALETTE.hideDark, flat: false });
   for (let i = 0; i < 6; i++) {
     const a = (i / 6) * TAU;
-    r.part(PRIM.oct(0), { bone: 'ring', pos: [Math.cos(a) * 6.5, 0, Math.sin(a) * 6.5], scale: 0.7, color: PALETTE.violet, emit: 2.6 });
+    r.part(PRIM.cyl(7), {
+      bone: 'ring', pos: [Math.cos(a) * 6.5, 0, Math.sin(a) * 6.5],
+      rot: [Math.PI / 2, -a, 0], scale: [0.75, 1.1, 0.75], color: PALETTE.bone,
+    });
   }
+  // jaws: hide above, pale gum below, fangs on both
   for (const [bone, s] of [['jawT', 1], ['jawB', -1]]) {
-    r.part(PRIM.wedge(5.0, 1.4, 5.0, 0.35), { bone, rot: [s * 0.2, 0, s > 0 ? 0 : Math.PI], color: PALETTE.voidMid });
+    r.part(PRIM.wedge(5.0, 1.4, 5.0, 0.35), { bone, rot: [s * 0.2, 0, s > 0 ? 0 : Math.PI], color: s > 0 ? PALETTE.hide : PALETTE.hideLite });
     for (let i = 0; i < 5; i++) {
-      r.part(PRIM.spike(1.5, 0.26, 4), { bone, pos: [-1.8 + i * 0.9, s * -0.3, -2.0], rot: [s * -Math.PI * 0.62, 0, 0], color: PALETTE.bone });
+      const big = i === 0 || i === 4;
+      r.part(PRIM.spike(big ? 2.3 : 1.4, big ? 0.32 : 0.22, 5), {
+        bone, pos: [-1.8 + i * 0.9, s * -0.3, -2.0], rot: [s * -Math.PI * 0.62, 0, 0], color: PALETTE.bone,
+      });
     }
-    r.part(PRIM.box(), { bone, pos: [0, s * 0.6, 0.4], scale: [3.6, 0.1, 0.14], color: PALETTE.magenta, emit: 2.8 });
+    // the throat, glimpsed when the jaw opens: the strike telegraph
+    r.part(PRIM.box(), { bone, pos: [0, s * 0.6, 0.4], scale: [3.6, 0.14, 0.2], color: PALETTE.emberDim, emit: 2.2 });
   }
-  r.part(PRIM.sph(12, 10), { bone: 'eye', scale: 1.3, color: 0xffe36e, emit: 3.6, flat: false });
-  r.part(PRIM.tor(0.5, 0.12, 6, 14), { bone: 'eye', rot: [Math.PI / 2, 0, 0], scale: 2.0, color: PALETTE.amber, emit: 2.6, flat: false });
+  r.part(PRIM.sph(12, 10), { bone: 'eye', scale: [1.2, 1.3, 1.0], color: 0xd8c060, emit: 1.6, flat: false });
+  r.part(PRIM.box(), { bone: 'eye', pos: [0, 0, -0.62], scale: [0.22, 1.5, 0.5], color: PALETTE.ironDark });
+  r.part(PRIM.tor(0.5, 0.14, 6, 14), { bone: 'eye', rot: [Math.PI / 2, 0, 0], scale: 2.0, color: PALETTE.hideDark, flat: false });
 
   const clips = {
     idle: (() => {
@@ -7015,7 +7378,7 @@ class ParticleFX {
   }
 
   /** Full destruction: flash, fireball, sparks, smoke and rising embers. */
-  explode(x, y, z, radius = 1, colorA = 0xffd08a, colorB = 0xff3ea5) {
+  explode(x, y, z, radius = 1, colorA = 0xffd08a, colorB = 0xc4551e) {
     const r = this.rng;
     this.glow.spawn({ x, y, z, color: 0xffffff, color2: colorA, size: 8 * radius, size2: 1, life: 0.19, alpha: 1, drag: 5 });
     const n = this._n(16 * radius);
@@ -7229,7 +7592,7 @@ class DecalFX {
     const geo = new THREE.PlaneGeometry(1, 1);
     this.geo = geo;
     this.pool = new Pool(() => {
-      const mat = createRingMaterial({ color: 0xff3ea5, thickness: 0.10, fill: 1 });
+      const mat = createRingMaterial({ color: 0xd9702c, thickness: 0.10, fill: 1 });
       const mesh = new THREE.Mesh(geo, mat);
       mesh.rotation.x = FLAT;
       mesh.visible = false;
@@ -7277,7 +7640,7 @@ class BeamFX {
     const geo = new THREE.PlaneGeometry(1, 1);
     this.geo = geo;
     this.pool = new Pool(() => {
-      const mat = createBeamMaterial(0xff3ea5);
+      const mat = createBeamMaterial(0xd9702c);
       const g = new THREE.Group();
       const a = new THREE.Mesh(geo, mat);
       const b = new THREE.Mesh(geo, mat);
@@ -7445,7 +7808,8 @@ class ScorchFX {
 
 /**
  * Blob shadows for every hovering entity, drawn as one InstancedMesh.
- * Cheaper than a shadow map and it suits the flat neon deck.
+ * Cheaper than a shadow map, and it grounds hovering entities the sun's own
+ * shadow map cannot reach.
  */
 class ShadowFX {
   constructor(scene, capacity = 120) {
@@ -8081,7 +8445,7 @@ class World {
  * ships.js — chassis and difficulty definitions.
  *
  * These are the base stats every run starts from; modules layer on top in
- * upgrades.js. Numbers are tuned so a clean wave-1 pilot kills a Skitter in
+ * upgrades.js. Numbers are tuned so a clean wave-1 pilot kills a coyote in
  * three hits and a Sentinel in about two seconds of sustained fire.
  */
 
@@ -8425,46 +8789,46 @@ let NEXT_ID = 1;
 
 const ENEMY_TYPES = {
   skitter: {
-    id: 'skitter', name: 'SKITTER', build: buildSkitter, cap: 64,
+    id: 'skitter', name: 'COYOTE', build: buildSkitter, cap: 64,
     hp: 24, speed: 15.5, radius: 0.85, score: 12, shards: 1, contact: 12, tier: 1,
-    color: 0xff3ea5, hover: 0, cost: 1,
-    codex: 'Cheap swarm chassis. Rushes, lunges, detonates. Never fight one — fight the pattern.',
+    color: 0xc98a4a, hover: 0, cost: 1,
+    codex: 'Half-starved and never alone. Rushes, lunges, keeps coming. Never fight one — fight the pack.',
   },
   drone: {
-    id: 'drone', name: 'DRONE', build: buildDrone, cap: 44,
+    id: 'drone', name: 'BUZZARD', build: buildDrone, cap: 44,
     hp: 38, speed: 11.5, radius: 1.0, score: 20, shards: 2, contact: 8, tier: 1,
-    color: 0xff6ec7, hover: 2.3, cost: 2,
-    codex: 'Standoff gunnery platform. Keeps its distance and chips at you. Close or die slowly.',
+    color: 0xb08a5c, hover: 2.3, cost: 2,
+    codex: 'Circles, waits, and picks. Keeps its distance and wears you down. Close, or die slowly.',
   },
   splitter: {
-    id: 'splitter', name: 'SPLITTER', build: buildSplitter, cap: 22,
+    id: 'splitter', name: 'POWDER KEG', build: buildSplitter, cap: 22,
     hp: 74, speed: 9.5, radius: 1.05, score: 30, shards: 2, contact: 14, tier: 2,
-    color: 0xa06bff, hover: 1.6, cost: 3,
-    codex: 'Unstable lattice. Breaks into two Skitters when killed — clear the room before it pops.',
+    color: 0xc4551e, hover: 0.55, cost: 3,
+    codex: 'Rolling, lit, and short of fuse. Bursts into two coyotes when it goes — clear the ground before it does.',
   },
   seeder: {
-    id: 'seeder', name: 'SEEDER', build: buildSeeder, cap: 14,
+    id: 'seeder', name: 'MORTAR CART', build: buildSeeder, cap: 14,
     hp: 88, speed: 7.5, radius: 1.25, score: 42, shards: 3, contact: 10, tier: 2,
-    color: 0xffb347, hover: 0, cost: 4,
-    codex: 'Artillery frame. Lobs shells at where you are going. Standing still is a decision.',
+    color: 0xd8a24e, hover: 0, cost: 4,
+    codex: 'Lobs shells at where you are going, not where you are. Standing still is a decision.',
   },
   lancer: {
-    id: 'lancer', name: 'LANCER', build: buildLancer, cap: 18,
+    id: 'lancer', name: 'LONGHORN', build: buildLancer, cap: 18,
     hp: 135, speed: 9.0, radius: 1.35, score: 55, shards: 3, contact: 18, tier: 3,
-    color: 0xffb347, hover: 0, cost: 5,
-    codex: 'Armoured ram. Winds up, then crosses the deck in a heartbeat. Dash sideways, never back.',
+    color: 0xa8683f, hover: 0, cost: 5,
+    codex: 'Paws once, then crosses the flat in a heartbeat. Dash sideways, never back.',
   },
   sentinel: {
-    id: 'sentinel', name: 'SENTINEL', build: buildSentinel, cap: 14,
+    id: 'sentinel', name: 'GATLING WALKER', build: buildSentinel, cap: 14,
     hp: 165, speed: 5.6, radius: 1.4, score: 65, shards: 4, contact: 12, tier: 3,
-    color: 0xff2f8f, hover: 0.0, cost: 6,
-    codex: 'Siege tripod. Paints a line, then deletes it. The telegraph is your whole window.',
+    color: 0xd9702c, hover: 0.0, cost: 6,
+    codex: 'Boiler on legs. Paints a line, then deletes it. The telegraph is your whole window.',
   },
   /** Invisible hit proxy that lets bosses reuse all normal weapon collision. */
   bossCore: {
     id: 'bossCore', name: 'BOSS', build: buildProxy, cap: 2, hidden: true,
     hp: 1, speed: 0, radius: 5, score: 0, shards: 0, contact: 20, tier: 4,
-    color: 0xff3ea5, hover: 3, cost: 0, codex: '',
+    color: 0xd9702c, hover: 3, cost: 0, codex: '',
   },
 };
 
@@ -9172,7 +9536,7 @@ const AI = {
         e.vx *= Math.max(0, 1 - 0.55 * dt);
         e.vz *= Math.max(0, 1 - 0.55 * dt);
         g.fx.glow.spawn({
-          x: e.x, y: e.y + 0.6, z: e.z, color: 0xffc24a, color2: 0xff3ea5,
+          x: e.x, y: e.y + 0.6, z: e.z, color: 0xffc24a, color2: 0xd9702c,
           size: 1.6, size2: 0.1, life: 0.26, alpha: 0.7, drag: 2.6,
         });
         if (e.stateTime > 1.15) { e.state = 'recover'; e.stateTime = 0; }
@@ -10530,19 +10894,19 @@ class Pickups {
 
 const BOSS_DEFS = {
   warden: {
-    id: 'warden', name: 'THE WARDEN', hp: 1800, radius: 6.4, scale: 1.3, contact: 20,
+    id: 'warden', name: 'THE WAGON FORT', hp: 1800, radius: 6.4, scale: 1.3, contact: 20,
     score: 1400, phases: [0.66, 0.33],
-    title: 'GATE-KEEPER OF THE FIFTH RIFT',
+    title: 'THEY CIRCLED UP AND NEVER LEFT',
   },
   harrower: {
-    id: 'harrower', name: 'THE HARROWER', hp: 3300, radius: 5.4, scale: 1.18, contact: 24,
+    id: 'harrower', name: 'THE IRON HORSE', hp: 3300, radius: 5.4, scale: 1.18, contact: 24,
     score: 2600, phases: [0.70, 0.35],
-    title: 'BLADE OF THE TENTH RIFT',
+    title: 'IT KEEPS TO NO TRACK',
   },
   maw: {
-    id: 'maw', name: 'THE VOID MAW', hp: 5200, radius: 7.8, scale: 1.06, contact: 30,
+    id: 'maw', name: 'THE RATTLER', hp: 5200, radius: 7.8, scale: 1.06, contact: 30,
     score: 5000, phases: [0.72, 0.40],
-    title: 'THAT WHICH EATS STABILIZERS',
+    title: 'IT GIVES YOU ONE WARNING',
   },
 };
 
@@ -11764,11 +12128,11 @@ class WaveDirector {
   _threatLine(w) {
     const types = this.unlockedTypes(w);
     const newest = types[types.length - 1];
-    if (w === 2) return 'NEW CONTACT — DRONE';
-    if (w === 3) return 'NEW CONTACT — SPLITTER';
-    if (w === 4) return 'NEW CONTACT — SEEDER';
-    if (w === 6) return 'NEW CONTACT — LANCER';
-    if (w === 7) return 'NEW CONTACT — SENTINEL';
+    if (w === 2) return 'NEW CONTACT — BUZZARD';
+    if (w === 3) return 'NEW CONTACT — POWDER KEG';
+    if (w === 4) return 'NEW CONTACT — MORTAR CART';
+    if (w === 6) return 'NEW CONTACT — LONGHORN';
+    if (w === 7) return 'NEW CONTACT — GATLING WALKER';
     const names = { skitter: 'SWARM', drone: 'GUNNERY', splitter: 'UNSTABLE', seeder: 'ARTILLERY', lancer: 'ARMOUR', sentinel: 'SIEGE' };
     return `${names[newest] || 'VOID'} ELEMENTS INBOUND`;
   }
@@ -12822,6 +13186,7 @@ class Game {
       this.audio.resume();
       this.audio.setVolumes(save.settings.master, save.settings.music, save.settings.sfx);
       if (this.state === 'menu' && !this.audio.musicOn) this.audio.startMusic('menu');
+      this.audio.startAmbience();
     };
     window.addEventListener('pointerdown', unlock, { passive: true });
     window.addEventListener('keydown', unlock, { passive: true });

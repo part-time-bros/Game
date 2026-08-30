@@ -2,7 +2,7 @@
  * ships.js — chassis and difficulty definitions.
  *
  * These are the base stats every run starts from; modules layer on top in
- * upgrades.js. Numbers are tuned so a clean wave-1 pilot kills a Skitter in
+ * upgrades.js. Numbers are tuned so a clean wave-1 pilot kills a coyote in
  * three hits and a Sentinel in about two seconds of sustained fire.
  */
 

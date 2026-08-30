@@ -78,7 +78,7 @@ export class DecalFX {
     const geo = new THREE.PlaneGeometry(1, 1);
     this.geo = geo;
     this.pool = new Pool(() => {
-      const mat = createRingMaterial({ color: 0xff3ea5, thickness: 0.10, fill: 1 });
+      const mat = createRingMaterial({ color: 0xd9702c, thickness: 0.10, fill: 1 });
       const mesh = new THREE.Mesh(geo, mat);
       mesh.rotation.x = FLAT;
       mesh.visible = false;
@@ -126,7 +126,7 @@ export class BeamFX {
     const geo = new THREE.PlaneGeometry(1, 1);
     this.geo = geo;
     this.pool = new Pool(() => {
-      const mat = createBeamMaterial(0xff3ea5);
+      const mat = createBeamMaterial(0xd9702c);
       const g = new THREE.Group();
       const a = new THREE.Mesh(geo, mat);
       const b = new THREE.Mesh(geo, mat);
@@ -294,7 +294,8 @@ export class ScorchFX {
 
 /**
  * Blob shadows for every hovering entity, drawn as one InstancedMesh.
- * Cheaper than a shadow map and it suits the flat neon deck.
+ * Cheaper than a shadow map, and it grounds hovering entities the sun's own
+ * shadow map cannot reach.
  */
 export class ShadowFX {
   constructor(scene, capacity = 120) {

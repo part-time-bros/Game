@@ -25,46 +25,46 @@ let NEXT_ID = 1;
 
 export const ENEMY_TYPES = {
   skitter: {
-    id: 'skitter', name: 'SKITTER', build: buildSkitter, cap: 64,
+    id: 'skitter', name: 'COYOTE', build: buildSkitter, cap: 64,
     hp: 24, speed: 15.5, radius: 0.85, score: 12, shards: 1, contact: 12, tier: 1,
-    color: 0xff3ea5, hover: 0, cost: 1,
-    codex: 'Cheap swarm chassis. Rushes, lunges, detonates. Never fight one — fight the pattern.',
+    color: 0xc98a4a, hover: 0, cost: 1,
+    codex: 'Half-starved and never alone. Rushes, lunges, keeps coming. Never fight one — fight the pack.',
   },
   drone: {
-    id: 'drone', name: 'DRONE', build: buildDrone, cap: 44,
+    id: 'drone', name: 'BUZZARD', build: buildDrone, cap: 44,
     hp: 38, speed: 11.5, radius: 1.0, score: 20, shards: 2, contact: 8, tier: 1,
-    color: 0xff6ec7, hover: 2.3, cost: 2,
-    codex: 'Standoff gunnery platform. Keeps its distance and chips at you. Close or die slowly.',
+    color: 0xb08a5c, hover: 2.3, cost: 2,
+    codex: 'Circles, waits, and picks. Keeps its distance and wears you down. Close, or die slowly.',
   },
   splitter: {
-    id: 'splitter', name: 'SPLITTER', build: buildSplitter, cap: 22,
+    id: 'splitter', name: 'POWDER KEG', build: buildSplitter, cap: 22,
     hp: 74, speed: 9.5, radius: 1.05, score: 30, shards: 2, contact: 14, tier: 2,
-    color: 0xa06bff, hover: 1.6, cost: 3,
-    codex: 'Unstable lattice. Breaks into two Skitters when killed — clear the room before it pops.',
+    color: 0xc4551e, hover: 0.55, cost: 3,
+    codex: 'Rolling, lit, and short of fuse. Bursts into two coyotes when it goes — clear the ground before it does.',
   },
   seeder: {
-    id: 'seeder', name: 'SEEDER', build: buildSeeder, cap: 14,
+    id: 'seeder', name: 'MORTAR CART', build: buildSeeder, cap: 14,
     hp: 88, speed: 7.5, radius: 1.25, score: 42, shards: 3, contact: 10, tier: 2,
-    color: 0xffb347, hover: 0, cost: 4,
-    codex: 'Artillery frame. Lobs shells at where you are going. Standing still is a decision.',
+    color: 0xd8a24e, hover: 0, cost: 4,
+    codex: 'Lobs shells at where you are going, not where you are. Standing still is a decision.',
   },
   lancer: {
-    id: 'lancer', name: 'LANCER', build: buildLancer, cap: 18,
+    id: 'lancer', name: 'LONGHORN', build: buildLancer, cap: 18,
     hp: 135, speed: 9.0, radius: 1.35, score: 55, shards: 3, contact: 18, tier: 3,
-    color: 0xffb347, hover: 0, cost: 5,
-    codex: 'Armoured ram. Winds up, then crosses the deck in a heartbeat. Dash sideways, never back.',
+    color: 0xa8683f, hover: 0, cost: 5,
+    codex: 'Paws once, then crosses the flat in a heartbeat. Dash sideways, never back.',
   },
   sentinel: {
-    id: 'sentinel', name: 'SENTINEL', build: buildSentinel, cap: 14,
+    id: 'sentinel', name: 'GATLING WALKER', build: buildSentinel, cap: 14,
     hp: 165, speed: 5.6, radius: 1.4, score: 65, shards: 4, contact: 12, tier: 3,
-    color: 0xff2f8f, hover: 0.0, cost: 6,
-    codex: 'Siege tripod. Paints a line, then deletes it. The telegraph is your whole window.',
+    color: 0xd9702c, hover: 0.0, cost: 6,
+    codex: 'Boiler on legs. Paints a line, then deletes it. The telegraph is your whole window.',
   },
   /** Invisible hit proxy that lets bosses reuse all normal weapon collision. */
   bossCore: {
     id: 'bossCore', name: 'BOSS', build: buildProxy, cap: 2, hidden: true,
     hp: 1, speed: 0, radius: 5, score: 0, shards: 0, contact: 20, tier: 4,
-    color: 0xff3ea5, hover: 3, cost: 0, codex: '',
+    color: 0xd9702c, hover: 3, cost: 0, codex: '',
   },
 };
 
@@ -772,7 +772,7 @@ const AI = {
         e.vx *= Math.max(0, 1 - 0.55 * dt);
         e.vz *= Math.max(0, 1 - 0.55 * dt);
         g.fx.glow.spawn({
-          x: e.x, y: e.y + 0.6, z: e.z, color: 0xffc24a, color2: 0xff3ea5,
+          x: e.x, y: e.y + 0.6, z: e.z, color: 0xffc24a, color2: 0xd9702c,
           size: 1.6, size2: 0.1, life: 0.26, alpha: 0.7, drag: 2.6,
         });
         if (e.stateTime > 1.15) { e.state = 'recover'; e.stateTime = 0; }

@@ -160,6 +160,7 @@ export class Game {
       this.audio.resume();
       this.audio.setVolumes(save.settings.master, save.settings.music, save.settings.sfx);
       if (this.state === 'menu' && !this.audio.musicOn) this.audio.startMusic('menu');
+      this.audio.startAmbience();
     };
     window.addEventListener('pointerdown', unlock, { passive: true });
     window.addEventListener('keydown', unlock, { passive: true });
