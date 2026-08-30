@@ -7,6 +7,11 @@ note of the soundtrack is generated in code at load time.
 
 ![menu](docs/screenshots/01-menu.jpg)
 
+> **This file describes what the game is.** For how it got that way — the
+> decisions, the root causes behind each fix, and what every guard in the test
+> suite is protecting — see **[DEVLOG.md](DEVLOG.md)**. Start there if you are
+> picking this project up cold.
+
 ---
 
 ## Run it
@@ -274,14 +279,15 @@ It builds, then boots *and plays* all three builds in about twenty seconds.
 - Death collapses are a procedural overlay rather than authored death clips, so
   every archetype crumples in a broadly similar way.
 - The soundtrack is generative, not composed — it never resolves to a chorus.
-- The audio mix is verified numerically (levels, clipping, duration) but has
-  never been listened to on speakers; timbre judgements are inferred from the
-  synthesis, not heard.
+- The audio is verified numerically — levels and clipping by `audiomix.mjs`,
+  envelope and spectrum by `gunshape.mjs` — but has never been listened to on
+  speakers. Timbre judgements are inferred from the synthesis, not heard.
 - Enemies path around obstacles by steering and separation, not a navmesh, so a
   Lancer occasionally clips a pillar corner during a charge (it stuns, which is
   the intended punish, but the collision reads as slightly abrupt).
-- Touch play works and is tested, but the arena is genuinely harder on a phone
-  than with a mouse even with aim assist; the camera does not compensate.
+- Touch play works and is tested, but the arena is still harder on a phone than
+  with a mouse. The Drive scheme closed most of the navigation gap; precise
+  aiming on a small screen is the part that remains.
 - Endless runs past roughly wave 25 lean on boss HP rather than new behaviour —
   the encounters stop gaining mechanics after the third cycle.
 - Career progress lives in `localStorage`; private-mode browsers report this in
