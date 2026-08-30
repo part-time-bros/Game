@@ -14,8 +14,8 @@ import { ENEMY_LIST } from '../entities/enemies.js';
 const $ = (id) => document.getElementById(id);
 
 const CONTROLS = [
-  ['W A S D', 'Thrusters (also arrow keys / left stick)'],
-  ['MOUSE', 'Aim — the lance tracks your cursor'],
+  ['W A S D', 'Steer — the ship points where it is going (arrows / left stick)'],
+  ['MOUSE', 'Aim somewhere other than straight ahead'],
   ['LMB / RT', 'Fire repeater'],
   ['RMB / E', 'Nova pulse — clears bullets, knocks back'],
   ['SPACE', 'Phase dash — invulnerable while dashing'],
@@ -300,13 +300,23 @@ export class UI {
       { value: 'auto', label: 'AUTO' }, { value: 'low', label: 'LOW' },
       { value: 'medium', label: 'MED' }, { value: 'high', label: 'HIGH' },
     ]);
+    choice('CONTROLS', 'controlScheme', [
+      { value: 'drive', label: 'DRIVE' }, { value: 'freeaim', label: 'FREE AIM' },
+    ]);
+    const ctrlHint = document.createElement('p');
+    ctrlHint.style.cssText = 'margin:-4px 0 6px;color:#8ea6c4;font-size:12px;line-height:1.45';
+    ctrlHint.textContent = {
+      drive: 'The left stick steers: the ship points where it is going. The right stick only shoots — push it to aim somewhere else, ignore it to fire straight ahead.',
+      freeaim: 'Classic twin-stick: the right stick sets which way the ship faces, the left one strafes independently.',
+    }[s.controlScheme] || '';
+    host.appendChild(ctrlHint);
     choice('CAMERA', 'cameraStyle', [
       { value: 'pov', label: 'POV' }, { value: 'chase', label: 'CHASE' }, { value: 'tactical', label: 'TOP' },
     ]);
     const camHint = document.createElement('p');
     camHint.style.cssText = 'margin:-4px 0 6px;color:#8ea6c4;font-size:12px;line-height:1.45';
     camHint.textContent = {
-      pov: 'Over-the-shoulder. The camera swings behind the ship as you turn — stick and touch aiming only; a mouse cursor keeps the view world-locked.',
+      pov: 'Over-the-shoulder. The camera leans toward the way you are heading — stick and touch only; a mouse cursor keeps the view world-locked.',
       chase: 'Low and wide, but world-locked: north is always up the screen.',
       tactical: 'High board view. Flattest, but you can see the whole deck.',
     }[s.cameraStyle] || '';

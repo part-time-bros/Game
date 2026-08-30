@@ -33,10 +33,20 @@ npm run verify          # build, then boot-and-play all three builds (~20s)
 
 ## Controls
 
+Two schemes, switchable under Settings → **CONTROLS**.
+
+**Drive** (default) — the left stick steers: the ship points where it is going,
+so the nose tells you your heading. Push it to 45° and you turn and travel that
+way at once. The right stick only shoots: push it to aim somewhere other than
+straight ahead, or ignore it entirely and fire down the nose.
+
+**Free aim** — classic twin-stick. The right stick sets which way the ship
+faces; the left one strafes independently.
+
 | Input | Action |
 | --- | --- |
-| `W A S D` / arrows / left stick | Thrusters |
-| Mouse / right stick | Aim — the lance tracks your cursor |
+| `W A S D` / arrows / left stick | Steer (drive) or strafe (free aim) |
+| Mouse / right stick | Aim |
 | `LMB` / `RT` / right stick | Fire repeater |
 | `RMB` / `E` / `X` | **Nova pulse** — radial blast that also deletes incoming bullets |
 | `SPACE` / `SHIFT` / `RB` | **Phase dash** — invulnerable for the whole dash |
@@ -113,18 +123,26 @@ Phantom (three dashes, glass) — unlocked by reaching waves 5 and 10.
 | Meshes | `MeshBuilder` composes primitives into one merged non-indexed geometry per model, carrying per-vertex colour and emissive attributes. One draw call per entity. |
 | Rigs | `RigBuilder` does the same but assigns each part to a bone and emits an `aBone` attribute, so an articulated model is still one draw call. |
 | Animation | Clips are authored in code as position/rotation/scale tracks, compiled against a skeleton, then crossfaded by a small animator with procedural overlays on top. |
+| Camera | A chase rig that knows about the scenery: the boom solves against the arena's collision cylinders every frame, winding in when rock gets between it and the ship, climbing over what it cannot back away from, and stepping around what it can do neither with. |
 | Terrain | Landforms, not stacked primitives: a dense icosphere or polar grid displaced by multi-octave value noise, sliced against fracture planes for an angular silhouette, stepped along bedding planes, then shaded with strata and baked cavity occlusion in vertex colour. |
 | Surface detail | Below the size of a triangle, relief comes from the normal: a triplanar height field turned into a shading normal by Mikkelsen's derivative bump, so untextured rock still reads up close with no UVs and no tangents. |
 | Ground | Displaced polar mesh under a fragment shader that adds Worley F2-F1 crazing in dried clay, patchy so it never covers the basin evenly, plus eight live impact ripples. |
 | Sky | An equirectangular nebula painted once into a canvas: fbm cloud layers sampled on a circle (so it tiles), three star populations, cross flares. |
 | Particles | Canvas-painted glow/smoke/shard sprites over a data-oriented `Points` system — one draw call per blend mode. |
-| Sound | WebAudio synthesis: oscillators, filtered noise bursts and a procedural convolution reverb. Thirty-six distinct effects. |
-| Music | A generative sequencer — drums, bass, arp and pads over a D-minor progression — whose layers, tempo and filter cutoffs follow combat intensity. |
+| Sound | WebAudio synthesis: oscillators, filtered noise bursts and a procedural convolution reverb. Thirty-six distinct effects. Firearms are built the way one is shaped — a sub-millisecond broadband crack, a low muzzle blast, and a tail rolling back off the canyon — because a pitch-swept oscillator is a laser however you tune it. |
+| Music | A generative sequencer over a D-minor vamp, voiced as an ensemble rather than a synth: plucked guitar chord tones, upright bass, hand drum and woodblock, and a two-reed harmonica lead that only speaks at phrase boundaries. Layers, tempo and brightness follow combat intensity. |
 
-The mix was balanced by measurement rather than by ear: `node tools/audiomix.mjs`
-renders every effect through an `OfflineAudioContext` and prints peak, RMS and
-audible duration, which is how three effectively-silent cues and an
-enemy-louder-than-you imbalance were found and fixed.
+Neither the mix nor the character of the sounds was judged by ear, because
+there is no ear here. `node tools/audiomix.mjs` renders every effect through an
+OfflineAudioContext and prints peak, RMS and audible duration; that is how three
+effectively-silent cues and an enemy-louder-than-you imbalance were found and
+fixed. `node tools/gunshape.mjs` answers a different question — loudness cannot
+distinguish a revolver from a laser, but the envelope and spectrum can, so it
+reports time-to-peak, how much energy lands inside the first 10ms and 100ms,
+how much is left in the tail, and how high the crack sits. Rebuilding the
+weapon cues moved `shoot` from a 967Hz crack peaking at 8ms with no tail at all
+to a 2.3kHz crack with half its energy inside ten milliseconds.
+
 
 ## Architecture
 
@@ -161,6 +179,8 @@ tools/
   endurance.mjs       long soak + deep Endless run (leak/drift detection)
   balance.mjs         scripted bot campaigns for tuning
   audiomix.mjs        offline render of every effect: peak / RMS / duration
+  gunshape.mjs        envelope + spectrum of the weapon cues, so "is this a
+                      gunshot or a laser" is a measurement, not an opinion
   visual.mjs          staged scene capture for art review
   rigview.mjs         isolated contact sheets of any animation clip
   check.mjs           syntax check across all modules

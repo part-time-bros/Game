@@ -38,7 +38,7 @@ export class AudioEngine {
     this._step = 0;
     this._nextNoteTime = 0;
     this._timer = null;
-    this._bpm = 124;
+    this._bpm = 104;
     this._mode = 'menu';       // menu | combat | boss | victory | defeat
     this._duckUntil = 0;
     this.offline = false;
@@ -239,6 +239,48 @@ export class AudioEngine {
     g.linearRampToValueAtTime(this.musicVol, t + time);
   }
 
+  /**
+   * A firearm report, built the way one is actually shaped.
+   *
+   *   crack  the supersonic snap off the bullet. Sub-millisecond attack, mostly
+   *          high frequency. This is the part that says "gun" rather than
+   *          "thud", and it is the part a pitch-swept oscillator cannot fake.
+   *   body   the muzzle blast — the low end you feel in your chest.
+   *   tail   the report coming back off the canyon a moment later. The send to
+   *          the convolution reverb does the rest.
+   *
+   * The old cue was a sawtooth sweeping 900Hz down to 290Hz: a textbook sci-fi
+   * laser, which is exactly what it sounded like in a western.
+   */
+  _gunshot(o) {
+    const v = o.gain !== undefined ? o.gain : 1;
+    const p = o.pitch || 1;
+    const t0 = this._now();
+    const jitter = 0.94 + Math.random() * 0.12;   // no two rounds identical
+    // The crack has to be loud as well as high: a highpass throws most of the
+    // noise away, so a gain that looks large here is not one you hear.
+    this._noiseBurst({
+      filter: 'highpass', f0: 3000 * p * jitter, f1: 1400 * p, q: 0.5,
+      dur: o.crackDur || 0.05, gain: 0.95 * v * (o.crack !== undefined ? o.crack : 1),
+      attack: 0.0005, at: t0,
+    });
+    this._noiseBurst({
+      filter: 'lowpass', f0: 1150 * p, f1: 190, q: 0.8,
+      dur: o.bodyDur || 0.11, gain: 0.20 * v, attack: 0.0008, at: t0,
+    });
+    this._tone({
+      type: 'sine', f0: (o.thump || 155) * p * jitter, f1: 46,
+      dur: (o.bodyDur || 0.11) * 1.2, gain: 0.19 * v, attack: 0.0008, at: t0,
+    });
+    if (o.tail !== 0) {
+      this._noiseBurst({
+        filter: 'lowpass', f0: 1500, f1: 250, q: 0.6,
+        dur: o.tailDur || 0.42, gain: 0.07 * v * (o.tail || 1),
+        attack: 0.022, at: t0 + 0.012,
+      });
+    }
+  }
+
   // ======================================================================
   //  SFX library
   // ======================================================================
@@ -249,59 +291,84 @@ export class AudioEngine {
     switch (name) {
       case 'shoot': {
         if (!this._gate('shoot', 0.028)) return;
-        const f = 900 * p * (0.94 + Math.random() * 0.12);
-        this._tone({ type: 'sawtooth', f0: f, f1: f * 0.32, dur: 0.12, gain: 0.30 * v, filter: 'bandpass', cutoff0: f * 1.5, cutoff1: f * 0.7, q: 1.5 });
-        this._noiseBurst({ f0: 2600, f1: 800, dur: 0.06, gain: 0.14 * v, q: 0.8 });
+        // Rapid fire only gets a tail every few rounds: real reports blur into
+        // one another, and four voices per shot at 35 rounds a second would
+        // eat the whole voice budget on its own.
+        // start at 0 so a single tapped shot gets its tail — the case where
+        // you most notice its absence
+        this._shotN = this._shotN === undefined ? 0 : (this._shotN + 1) % 3;
+        // held back a little: this fires several times a second, and at parity
+        // with the explosion cue it pumps the limiter on its own
+        this._gunshot({
+          gain: v * 0.76, pitch: p * 1.15, crackDur: 0.042, bodyDur: 0.085,
+          thump: 172, tail: this._shotN === 0 ? 1 : 0, tailDur: 0.34,
+        });
         break;
       }
       case 'shootHeavy': {
         if (!this._gate('shootHeavy', 0.04)) return;
-        this._tone({ type: 'square', f0: 420 * p, f1: 120, dur: 0.16, gain: 0.2 * v, filter: 'lowpass', cutoff0: 2200, cutoff1: 500, q: 3 });
-        this._noiseBurst({ f0: 1800, f1: 300, dur: 0.13, gain: 0.13 * v });
+        // buffalo rifle: less crack, far more body, and a tail that rolls
+        this._gunshot({
+          gain: v * 1.15, pitch: p * 0.68, crack: 0.8, crackDur: 0.06,
+          bodyDur: 0.19, thump: 104, tail: 1.6, tailDur: 0.7,
+        });
+        this.duck(0.14, 0.3);
         break;
       }
       case 'enemyShoot': {
         if (!this._gate('enemyShoot', 0.05)) return;
-        this._tone({ type: 'square', f0: 320 * p, f1: 140 * p, dur: 0.15, gain: 0.19 * v, filter: 'bandpass', cutoff0: 520, cutoff1: 220, q: 1.2 });
+        // heard from across the arena: the crack thins out, the tail does not
+        this._gunshot({
+          gain: v * 0.72, pitch: p * 0.86, crack: 0.45, crackDur: 0.05,
+          bodyDur: 0.1, thump: 132, tail: 1.3, tailDur: 0.5,
+        });
         break;
       }
       case 'hit': {
         if (!this._gate('hit', 0.022)) return;
-        this._noiseBurst({ f0: 2200 * p, f1: 620, dur: 0.06, gain: 0.20 * v, q: 1.1 });
-        this._tone({ type: 'triangle', f0: 560 * p, f1: 200, dur: 0.06, gain: 0.13 * v });
+        // lead into hide and timber: a dull thwack, no ring
+        this._noiseBurst({ filter: 'bandpass', f0: 1500 * p, f1: 420, dur: 0.055, gain: 0.21 * v, attack: 0.0008, q: 1.0 });
+        this._tone({ type: 'triangle', f0: 300 * p, f1: 120, dur: 0.07, gain: 0.13 * v, attack: 0.001 });
         break;
       }
       case 'crit': {
         if (!this._gate('crit', 0.03)) return;
-        this._noiseBurst({ f0: 4200, f1: 1200, dur: 0.10, gain: 0.22 * v, q: 1.4 });
-        this._tone({ type: 'triangle', f0: 1500, f1: 620, dur: 0.14, gain: 0.17 * v });
-        this._tone({ type: 'triangle', f0: 2260, f1: 940, dur: 0.11, gain: 0.10 * v, detune: 9 });
+        // a spang off iron, with the ricochet whine going away from you
+        this._noiseBurst({ filter: 'highpass', f0: 4600, f1: 1500, dur: 0.07, gain: 0.22 * v, attack: 0.0005, q: 0.9 });
+        this._tone({ type: 'triangle', f0: 2400 * p, f1: 700, dur: 0.26, gain: 0.12 * v, attack: 0.002 });
+        this._tone({ type: 'sine', f0: 1750 * p, f1: 520, dur: 0.30, gain: 0.07 * v, attack: 0.003, detune: 14 });
         break;
       }
       case 'kill': {
         if (!this._gate('kill', 0.035)) return;
-        this._noiseBurst({ f0: 1500, f1: 180, dur: 0.28, gain: 0.17 * v, filter: 'lowpass', q: 0.8 });
-        this._tone({ type: 'sine', f0: 240, f1: 48, dur: 0.3, gain: 0.2 * v });
+        // something heavy going down, and the dust it kicks up
+        this._tone({ type: 'sine', f0: 190, f1: 40, dur: 0.34, gain: 0.21 * v, attack: 0.002 });
+        this._noiseBurst({ filter: 'lowpass', f0: 900, f1: 130, dur: 0.34, gain: 0.16 * v, attack: 0.004, q: 0.7 });
         break;
       }
       case 'explosion': {
+        // dynamite: a blast, then the report off the walls, then falling rock
         const size = opts.size || 1;
-        this._noiseBurst({ f0: 1100 * (1 / size), f1: 90, dur: 0.5 * size, gain: 0.3 * v, filter: 'lowpass', q: 0.7 });
-        this._tone({ type: 'sine', f0: 180 / size, f1: 32, dur: 0.6 * size, gain: 0.34 * v });
-        this._noiseBurst({ f0: 5000, f1: 1200, dur: 0.1, gain: 0.14 * v });
-        this.duck(0.28, 0.4);
+        const t0 = this._now();
+        this._noiseBurst({ filter: 'highpass', f0: 3800, f1: 900, dur: 0.06, gain: 0.20 * v, attack: 0.0006, at: t0 });
+        this._tone({ type: 'sine', f0: 150 / size, f1: 28, dur: 0.6 * size, gain: 0.36 * v, attack: 0.002, at: t0 });
+        this._noiseBurst({ filter: 'lowpass', f0: 900 / size, f1: 70, dur: 0.55 * size, gain: 0.30 * v, attack: 0.003, q: 0.7, at: t0 });
+        this._noiseBurst({ filter: 'bandpass', f0: 2600, f1: 700, dur: 0.5 * size, gain: 0.07 * v, attack: 0.09, q: 0.9, at: t0 + 0.07 });
+        this.duck(0.28, 0.45);
         break;
       }
       case 'dash': {
-        this._noiseBurst({ f0: 400, f1: 3600, dur: 0.18, gain: 0.30 * v, q: 1.0 });
-        this._tone({ type: 'sine', f0: 420, f1: 90, dur: 0.26, gain: 0.22 * v });
+        // spur and a whip crack, then the surge
+        this._noiseBurst({ filter: 'highpass', f0: 6000, f1: 2200, dur: 0.035, gain: 0.26 * v, attack: 0.0005, q: 0.8 });
+        this._noiseBurst({ filter: 'bandpass', f0: 500, f1: 2600, dur: 0.2, gain: 0.20 * v, attack: 0.01, q: 1.0 });
+        this._tone({ type: 'sine', f0: 260, f1: 80, dur: 0.28, gain: 0.18 * v, attack: 0.004 });
         break;
       }
       case 'pulse': {
-        this._tone({ type: 'sine', f0: 150, f1: 34, dur: 0.55, gain: 0.42 * v });
-        this._noiseBurst({ f0: 260, f1: 3400, dur: 0.3, gain: 0.2 * v, q: 0.8 });
-        this._tone({ type: 'sawtooth', f0: 220, f1: 880, dur: 0.22, gain: 0.11 * v, filter: 'lowpass', cutoff0: 500, cutoff1: 3000 });
-        this.duck(0.3, 0.4);
+        // both barrels at once
+        this._gunshot({ gain: v * 1.3, pitch: 0.55, crack: 1.1, crackDur: 0.07, bodyDur: 0.26, thump: 82, tail: 2.0, tailDur: 0.9 });
+        this._tone({ type: 'sine', f0: 120, f1: 30, dur: 0.5, gain: 0.30 * v, attack: 0.003 });
+        this.duck(0.3, 0.45);
         break;
       }
       case 'pulseFail':
@@ -462,9 +529,20 @@ export class AudioEngine {
   // ======================================================================
   //  Generative soundtrack
   // ======================================================================
+  /** Tempo per mode. A spaghetti-western vamp walks; it does not sprint. */
+  _tempoFor(mode) {
+    if (mode === 'boss') return 118;
+    if (mode === 'combat') return 104;
+    return 76;
+  }
+
   startMusic(mode = 'menu') {
     if (!this.ready) return;
     this._mode = mode;
+    // Set the tempo here too. setMusicMode early-returns when the mode has not
+    // changed, so starting straight into a mode used to inherit whatever bpm
+    // happened to be left over from the last one.
+    this._bpm = this._tempoFor(mode);
     this.musicOn = true;
     this.musBus.gain.setTargetAtTime(this.musicVol, this.ctx.currentTime, 0.4);
     if (this._timer) return;
@@ -483,9 +561,7 @@ export class AudioEngine {
   setMusicMode(mode) {
     if (this._mode === mode) return;
     this._mode = mode;
-    if (mode === 'boss') this._bpm = 138;
-    else if (mode === 'combat') this._bpm = 124;
-    else this._bpm = 96;
+    this._bpm = this._tempoFor(mode);
   }
 
   setIntensity(v) { this._targetIntensity = clamp01(v); }
@@ -504,9 +580,25 @@ export class AudioEngine {
     this.intensity = lerp(this.intensity, this._targetIntensity, 0.06);
   }
 
+  /**
+   * One 16th-note step of the score.
+   *
+   * The harmony was always right for this — a natural-minor vamp is where
+   * spaghetti westerns live — but the voicing was a synthwave kit: four-on-the
+   * floor drums, a resonant sawtooth bass and a random arpeggio. Over a desert
+   * that reads as parody. Same chords, rebuilt as instruments instead:
+   *
+   *   guitar   plucked chord tones, hard attack and a fast decay through a
+   *            closing lowpass, with a noise transient for the pick
+   *   bass     upright: a short round triangle on the root, no filter sweep
+   *   perc     a low hand drum and a woodblock rather than a kick and snare,
+   *            with a gallop pattern when the fight gets going
+   *   lead     two detuned reeds through a bandpass, held long — a harmonica
+   *            phrase, sparse enough to leave room for the gunfire
+   *   drone    a quiet sustained low bed, the only survivor of the old pads
+   */
   _scheduleStep(step, t, stepDur) {
     const bar = Math.floor(step / 16);
-    const beat = Math.floor((step % 16) / 4);
     const six = step % 16;
     const prog = PROGRESSION[bar % PROGRESSION.length];
     const I = this.intensity;
@@ -514,57 +606,88 @@ export class AudioEngine {
     const menu = this._mode === 'menu';
     const dest = this.musBus;
 
-    // ---- drums ----
+    // ---- percussion ----
     if (!menu) {
-      const kickOn = six === 0 || six === 6 || (I > 0.45 && six === 10) || (boss && six === 14);
-      if (kickOn) {
-        this._tone({ type: 'sine', f0: 150, f1: 42, dur: 0.24, gain: 0.5, at: t, dest, attack: 0.002 });
-        this._noiseBurst({ f0: 120, f1: 60, dur: 0.06, gain: 0.12, at: t, dest, filter: 'lowpass' });
+      // low hand drum: steady on the half-bar, gallop when the pressure is on
+      const gallop = boss || I > 0.55;
+      const drumOn = six === 0 || six === 8 || (gallop && (six === 3 || six === 11)) || (boss && six === 14);
+      if (drumOn) {
+        const deep = six === 0 || six === 8;
+        this._tone({
+          type: 'sine', f0: deep ? 96 : 128, f1: deep ? 44 : 62,
+          dur: deep ? 0.3 : 0.16, gain: deep ? 0.33 : 0.18, at: t, dest, attack: 0.003,
+        });
+        this._noiseBurst({ filter: 'lowpass', f0: 320, f1: 90, dur: 0.07, gain: 0.07, at: t, dest, q: 0.7 });
       }
+      // woodblock on the backbeat — dry, wooden, no snare rattle
       if (six === 4 || six === 12) {
-        this._noiseBurst({ f0: 1900, f1: 700, dur: 0.16, gain: 0.16 + I * 0.1, at: t, dest, q: 0.9 });
-        this._tone({ type: 'triangle', f0: 320, f1: 180, dur: 0.1, gain: 0.1, at: t, dest });
+        this._noiseBurst({ filter: 'bandpass', f0: 2400, f1: 1500, dur: 0.045, gain: 0.11 + I * 0.05, at: t, dest, q: 3.2, attack: 0.0008 });
+        this._tone({ type: 'triangle', f0: 1150, f1: 800, dur: 0.05, gain: 0.06, at: t, dest, attack: 0.001 });
       }
-      if (I > 0.28 && step % 2 === 0) {
-        this._noiseBurst({ f0: 8200, f1: 6000, dur: 0.035, gain: 0.035 + I * 0.03, at: t, dest, filter: 'highpass', q: 0.7 });
-      }
-      if (I > 0.7 && six === 15 && Math.random() < 0.5) {
-        this._noiseBurst({ f0: 3000, f1: 9000, dur: 0.22, gain: 0.07, at: t, dest, q: 0.6 });
+      // shaker, only once the fight is moving
+      if (I > 0.3 && step % 2 === 1) {
+        this._noiseBurst({ filter: 'highpass', f0: 7000, f1: 5200, dur: 0.03, gain: 0.022 + I * 0.02, at: t, dest, q: 0.7 });
       }
     }
 
-    // ---- bass ----
+    // ---- upright bass ----
     if (!menu || I > 0.1) {
-      const pattern = boss ? [0, 3, 6, 8, 11, 14] : [0, 6, 8, 14];
-      if (pattern.includes(six)) {
-        const oct = six === 0 ? 0 : (Math.random() < 0.22 ? 12 : 0);
+      const walk = boss ? [0, 4, 8, 12] : [0, 8];
+      if (walk.includes(six) || (I > 0.5 && six === 14)) {
+        const fifth = six === 14 || (boss && six === 12);
         this._tone({
-          type: 'sawtooth', f0: NOTE(prog.root - 12 + oct), dur: stepDur * (six === 0 ? 3.4 : 1.8),
-          gain: 0.16 + I * 0.1, at: t, dest, filter: 'lowpass',
-          cutoff0: 220 + I * 900, cutoff1: 160 + I * 400, q: 6, expo: false,
+          type: 'triangle', f0: NOTE(prog.root - 12 + (fifth ? 7 : 0)),
+          dur: stepDur * 3.2, gain: 0.20 + I * 0.06, at: t, dest, attack: 0.006,
+          filter: 'lowpass', cutoff0: 520, cutoff1: 260, q: 1.1, expo: false,
         });
       }
     }
 
-    // ---- arp / lead ----
-    const arpDensity = menu ? 0.16 : 0.3 + I * 0.5;
-    if (step % 2 === 0 && Math.random() < arpDensity) {
-      const deg = SCALE[Math.floor(Math.random() * SCALE.length)];
-      const oct = Math.random() < 0.35 ? 12 : 0;
-      this._tone({
-        type: boss ? 'square' : 'triangle', f0: NOTE(prog.root + 12 + deg + oct),
-        dur: stepDur * 1.6, gain: (menu ? 0.055 : 0.05 + I * 0.05), at: t, dest,
-        filter: 'bandpass', cutoff0: 1400 + I * 2200, q: 2.6,
-      });
+    // ---- guitar ----
+    // Eighth notes through the chord, which is the figure the whole genre runs
+    // on. Deterministic rather than random: a fixed arpeggio is what makes it
+    // sound played rather than generated.
+    if (step % 2 === 0) {
+      const idx = (step / 2) % 4;
+      const shape = [0, 1, 2, 1];               // root, third, fifth, third
+      const note = prog.chord[shape[idx]] + 12;
+      const play = menu ? (six % 8 === 0) : (I > 0.22 || six % 4 === 0);
+      if (play) {
+        const g = menu ? 0.085 : 0.075 + I * 0.045;
+        this._noiseBurst({ filter: 'highpass', f0: 3600, f1: 2000, dur: 0.02, gain: g * 0.5, at: t, dest, q: 0.8, attack: 0.0005 });
+        this._tone({
+          type: 'triangle', f0: NOTE(note), dur: stepDur * 3.4, gain: g, at: t, dest,
+          attack: 0.002, filter: 'lowpass', cutoff0: 2600, cutoff1: 700, q: 1.4,
+        });
+        // a second string an octave down on the downbeat, for body
+        if (six === 0 || six === 8) {
+          this._tone({
+            type: 'triangle', f0: NOTE(note - 12), dur: stepDur * 3.0, gain: g * 0.6, at: t, dest,
+            attack: 0.003, filter: 'lowpass', cutoff0: 1500, cutoff1: 500, q: 1.2, detune: -4,
+          });
+        }
+      }
     }
 
-    // ---- pad (bar changes) ----
+    // ---- harmonica lead ----
+    // Sparse by design: it has to sit above the mix without competing with the
+    // gunfire, so it only speaks at phrase boundaries.
+    const leadAt = boss ? (six === 0 || six === 10) : (six === 0 && bar % 2 === 1);
+    if (leadAt && (menu ? bar % 2 === 0 : I > 0.18)) {
+      const deg = SCALE[[0, 2, 4, 6][bar % 4]];
+      const f = NOTE(prog.root + 12 + deg);
+      const g = (menu ? 0.05 : 0.035 + I * 0.04);
+      const dur = stepDur * (boss ? 6 : 11);
+      // two reeds slightly apart: the beating between them is the sound
+      this._tone({ type: 'square', f0: f, dur, gain: g, at: t, dest, attack: 0.09, detune: -9, filter: 'bandpass', cutoff0: 1500, q: 2.2 });
+      this._tone({ type: 'square', f0: f, dur, gain: g * 0.9, at: t, dest, attack: 0.13, detune: 11, filter: 'bandpass', cutoff0: 1900, q: 2.6 });
+    }
+
+    // ---- drone ----
     if (six === 0) {
-      const padGain = menu ? 0.05 : 0.028 + I * 0.03;
-      for (const n of prog.chord) {
-        this._tone({ type: 'sawtooth', f0: NOTE(n), dur: stepDur * 15, gain: padGain, at: t, dest, attack: 0.5, detune: -6, filter: 'lowpass', cutoff0: 420 + I * 700, q: 1.5, expo: false });
-        this._tone({ type: 'sawtooth', f0: NOTE(n), dur: stepDur * 15, gain: padGain, at: t, dest, attack: 0.6, detune: 7, filter: 'lowpass', cutoff0: 380 + I * 600, q: 1.5, expo: false });
-      }
+      const droneGain = menu ? 0.045 : 0.026 + I * 0.022;
+      this._tone({ type: 'sawtooth', f0: NOTE(prog.root - 24), dur: stepDur * 15, gain: droneGain, at: t, dest, attack: 0.6, filter: 'lowpass', cutoff0: 240 + I * 220, q: 1.2, expo: false });
+      this._tone({ type: 'sawtooth', f0: NOTE(prog.root - 12), dur: stepDur * 15, gain: droneGain * 0.7, at: t, dest, attack: 0.8, detune: 6, filter: 'lowpass', cutoff0: 300 + I * 260, q: 1.2, expo: false });
       if (boss) {
         this._tone({ type: 'sawtooth', f0: NOTE(prog.root - 24), dur: stepDur * 16, gain: 0.1, at: t, dest, attack: 0.3, filter: 'lowpass', cutoff0: 180, q: 3, expo: false });
       }

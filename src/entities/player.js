@@ -15,6 +15,8 @@ import { baseStats, MODULES } from '../systems/upgrades.js';
 import { SHIPS } from '../systems/ships.js';
 
 const HOVER_Y = 1.05;
+/** Radians per second the hull may swing its nose. ~570 deg/s: quick, but readable. */
+const TURN_RATE = 10;
 
 export class Player {
   constructor(scene, game) {
@@ -208,8 +210,16 @@ export class Player {
       const d = lengthXZ(dx, dz);
       if (d > 0.4) this.aimDir.set(dx / d, 0, dz / d);
     }
+    // A vehicle swings its nose at a bounded rate. Snapping to the aim
+    // instantly is what makes a twin-stick read as a cursor with a sprite
+    // attached rather than as something you are driving — and from a low
+    // camera the nose is the only heading cue there is. Damping still handles
+    // the last few degrees, so it settles rather than stopping dead.
     const targetYaw = Math.atan2(this.aimDir.x, this.aimDir.z);
-    this.yaw = dampAngle(this.yaw, targetYaw, 0.000004, dt);
+    const eased = dampAngle(this.yaw, targetYaw, 0.000004, dt);
+    const step = wrapAngle(eased - this.yaw);
+    const maxStep = TURN_RATE * dt;
+    this.yaw = wrapAngle(this.yaw + clamp(step, -maxStep, maxStep));
 
     // ---------- movement ----------
     const mx = input.move.x, mz = input.move.z;

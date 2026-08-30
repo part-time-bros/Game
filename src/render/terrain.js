@@ -253,6 +253,8 @@ export function buildRock(seed = 1, opts = {}) {
   // bedding planes: how many ledges run around the body
   const beds = opts.beds === undefined ? 3.0 + rnd() * 3.5 : opts.beds;
   const ledge = opts.ledge === undefined ? 0.34 : opts.ledge;
+  // 0 = no cap; otherwise the height (in unit space) the top is sheared off at
+  const flatTop = opts.flatTop === undefined ? 0 : opts.flatTop;
 
   // Fracture planes. Stone breaks along flat faces with hard edges between
   // them; noise alone only ever produces blobs. Slicing the displaced body
@@ -291,6 +293,10 @@ export function buildRock(seed = 1, opts = {}) {
       const t = v.x * P.nx + v.y * P.ny + v.z * P.nz - P.d * (tall + wide) * 0.5;
       if (t > 0) { v.x -= P.nx * t; v.y -= P.ny * t; v.z -= P.nz * t; }
     }
+    // A flat cap. What separates a butte from a boulder is that erosion took
+    // the soft rock and left a hard horizontal layer on top; without the cut
+    // the same noise just makes a lump.
+    if (flatTop > 0 && v.y > flatTop * tall) v.y = flatTop * tall;
     // a flat bottom, so it sits in the ground on a face instead of on a point
     if (v.y < -0.12 * tall) v.y = -0.12 * tall;
     pos.setXYZ(i, v.x, v.y, v.z);
@@ -353,8 +359,11 @@ export function buildGround(playRadius = 46, outerRadius = 150) {
     // and ground that dips far below it leaves them hanging in the air.
     const inner = fbm3(x * 0.035, 0.5, z * 0.035, 3) - 0.5;
     let h = -0.07 + inner * 0.18;
-    // beyond the play area the ground lifts into the canyon's base
-    const out = clamp01((rad - playRadius * 0.92) / 26);
+    // Beyond the play area the ground lifts into the canyon's base. The ramp
+    // has to start at the boundary, not inside it: on a small arena 0.92x was
+    // close enough, but scaled up it began several units early and pushed the
+    // ground up through the plane the ship sits on.
+    const out = clamp01((rad - playRadius) / 30);
     h += out * out * 9.5 * (0.55 + fbm3(x * 0.02, 3.1, z * 0.02, 3) * 0.9);
     // dry washes cut across the flats, shallow enough to keep contact
     const wash = ridge3(x * 0.017, 7.7, z * 0.017, 3);
@@ -528,7 +537,7 @@ export function buildCanyon(radius = 46, seed = 7) {
 export function buildMesaBelt(seed = 21) {
   const rnd = mulberry(seed);
   const parts = [];
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < 38; i++) {
     const geo = buildRock(seed * 31 + i, {
       detail: 2,
       rough: 0.30,
@@ -536,8 +545,8 @@ export function buildMesaBelt(seed = 21) {
       wide: 1.0,
     });
     const a = rnd() * TAU;
-    const r = 150 + rnd() * 230;
-    const s = 26 + rnd() * 46;
+    const r = 215 + rnd() * 300;
+    const s = 34 + rnd() * 60;
     geo.scale(s, s * (0.5 + rnd() * 0.55), s * (0.7 + rnd() * 0.6));
     geo.rotateY(rnd() * TAU);
     geo.translate(Math.cos(a) * r, -3, Math.sin(a) * r);

@@ -10,7 +10,17 @@ import { noiseTexture, skyTexture } from './textures.js';
 import { buildWaterTower } from './models.js';
 import { buildRock, buildGround, buildCanyon, buildMesaBelt, buildBranchTree, buildSaguaro, buildScrub, buildPebble, mergeGeometries, seat } from './terrain.js';
 
-export const ARENA_RADIUS = 46;
+/**
+ * Play radius. Everything else derives from it — the canyon, the ground mesh,
+ * spawn rings, projectile bounds, boss patrol limits — so this is the one
+ * number that resizes the arena.
+ */
+export const ARENA_RADIUS = 66;
+
+/** Where the sun sits relative to whatever the shadow frustum is centred on. */
+const SUN_OFFSET = new THREE.Vector3(-58, 34, -24);
+/** Half-width of the shadow ortho box, in world units. */
+const SHADOW_SPAN = 46;
 
 export class World {
   constructor(scene, rng) {
@@ -34,16 +44,18 @@ export class World {
     // A real light, not a direction uniform. This is what buys cast shadows,
     // and cast shadows are most of what "golden hour" means.
     this.sun = new THREE.DirectionalLight(0xffd2a1, 1.95);
-    this.sun.position.set(-58, 30, -24);
+    this.sun.position.copy(SUN_OFFSET);
     this.sun.target.position.set(0, 0, 0);
     this.sun.castShadow = true;
     const sc = this.sun.shadow;
     sc.mapSize.set(2048, 2048);
-    // One cascade sized to the arena: the whole playfield is 46 across, so a
-    // 64-unit ortho box covers it without the resolution loss of a big frustum.
-    sc.camera.left = -64; sc.camera.right = 64;
-    sc.camera.top = 64; sc.camera.bottom = -64;
-    sc.camera.near = 1; sc.camera.far = 190;
+    // The frustum follows the player (see update) rather than covering the
+    // whole arena: a box wide enough for a 66-unit playfield would spend most
+    // of its resolution on ground nobody is looking at. This one is smaller
+    // than the old fixed box *and* sharper, on a much larger arena.
+    sc.camera.left = -SHADOW_SPAN; sc.camera.right = SHADOW_SPAN;
+    sc.camera.top = SHADOW_SPAN; sc.camera.bottom = -SHADOW_SPAN;
+    sc.camera.near = 1; sc.camera.far = 230;
     sc.bias = -0.0008;
     sc.normalBias = 0.06;
     scene.add(this.sun);
@@ -61,7 +73,7 @@ export class World {
 
     // Distance haze. The materials are three's standard now, so fog has to be
     // on the scene — `fog: true` on a material does nothing without it.
-    this.fog = new THREE.Fog(0x8a6a4c, 105, 330);
+    this.fog = new THREE.Fog(0x7d5f43, 155, 470);
     scene.fog = this.fog;
 
     // ---------- ground ----------
@@ -71,7 +83,7 @@ export class World {
     // that the floor shader then details.
     this.floorMat = createFloorMaterial();
     this.floorMat.uniforms.uRadius.value = this.radius;
-    this.floor = new THREE.Mesh(buildGround(this.radius, 150), this.floorMat);
+    this.floor = new THREE.Mesh(buildGround(this.radius, 215), this.floorMat);
     this.floor.receiveShadow = true;
     scene.add(this.floor);
 
@@ -102,15 +114,24 @@ export class World {
     // ---------- cover: spires, dead trees, cactus ----------
     this.pillarMat = createNovaMaterial({ rim: 0.28, spec: 0.05, rimColor: 0xffb877, bump: 0.22, bumpScale: 0.5 });
     this.pillars = [];
+    // Angle, radius, kind. Two rings of cover plus outliers: the inner ring is
+    // what you fight around, the outer one breaks up the run to the wall. A
+    // butte is a wide flat-topped mass, a spire is a narrow one — mixing the
+    // silhouettes is most of what stops an arena reading as a field of cones.
     const layout = [
-      [0.30, 24, 'spire'], [1.35, 30, 'spire'], [2.35, 22, 'tree'], [3.35, 31, 'spire'],
-      [4.35, 25, 'spire'], [5.35, 30, 'tree'], [0.85, 38, 'spire'], [2.90, 39, 'cactus'],
-      [4.95, 38, 'spire'], [1.90, 15, 'cactus'], [3.90, 17, 'tree'], [5.90, 36, 'cactus'],
+      [0.30, 22, 'spire'], [1.35, 26, 'butte'], [2.35, 20, 'tree'], [3.35, 27, 'spire'],
+      [4.35, 23, 'butte'], [5.35, 26, 'tree'], [1.90, 14, 'cactus'], [3.90, 16, 'tree'],
+      [0.85, 40, 'spire'], [1.75, 44, 'butte'], [2.60, 41, 'cactus'], [3.45, 45, 'spire'],
+      [4.30, 40, 'butte'], [5.15, 44, 'tree'], [6.00, 42, 'spire'], [0.10, 46, 'cactus'],
+      [0.55, 57, 'butte'], [1.55, 59, 'spire'], [2.20, 55, 'cactus'], [3.10, 58, 'butte'],
+      [3.80, 56, 'tree'], [4.70, 59, 'spire'], [5.60, 55, 'butte'], [6.15, 57, 'cactus'],
+      [2.85, 33, 'tree'], [5.90, 34, 'cactus'],
     ];
     const kinds = {
       spire: [this._spire(0), this._spire(1), this._spire(2)],
-      tree: [buildBranchTree(0), buildBranchTree(1)],
-      cactus: [buildSaguaro(0), buildSaguaro(1)],
+      butte: [this._butte(0), this._butte(1), this._butte(2)],
+      tree: [buildBranchTree(0), buildBranchTree(1), buildBranchTree(2)],
+      cactus: [buildSaguaro(0), buildSaguaro(1), buildSaguaro(2)],
     };
     this._pillarGeos = [];
     for (const k in kinds) for (const g of kinds[k]) this._pillarGeos.push(g.geometry);
@@ -128,7 +149,9 @@ export class World {
       scene.add(m);
       this.pillars.push(m);
       // only rock blocks; you ride straight through a cactus or a dead tree
-      if (kind === 'spire') this.obstacles.push({ x, z, r: spec.radius * s * 1.5, height: spec.height * s });
+      if (kind === 'spire' || kind === 'butte') {
+        this.obstacles.push({ x, z, r: spec.radius * s * 1.5, height: spec.height * s });
+      }
     });
     // the tower's legs are solid
     this.obstacles.push({ x: 0, z: 0, r: 4.4, height: 7, core: true });
@@ -150,7 +173,7 @@ export class World {
     scene.add(this.mist);
 
     // ---------- ambient motes ----------
-    this.motes = this._buildMotes(420);
+    this.motes = this._buildMotes(620);
     scene.add(this.motes);
   }
 
@@ -182,15 +205,42 @@ export class World {
   }
 
   /**
+   * A butte: wide, flat-topped, heavily bedded. The counterpart to a spire —
+   * an arena of nothing but tall narrow rocks reads as a field of cones, and
+   * the contrast in silhouette is what makes either one land.
+   */
+  _butte(seed) {
+    const h = 9.0 + (seed % 3) * 3.2;
+    const cap = seat(buildRock(seed * 197 + 61, {
+      rough: 0.28, tall: 1.0, wide: 1.0, beds: 3.2, ledge: 0.40, cuts: 9, flatTop: 0.72,
+    }).scale(5.6, h / 0.84, 4.9), 0.5);
+    const parts = [cap];
+    // a talus skirt, so the mass grows out of the ground instead of landing on it
+    for (let i = 0; i < 5; i++) {
+      const a = (i / 5) * TAU + seed * 1.7;
+      const sc = 1.1 + (i % 3) * 0.5;
+      const g = seat(buildRock(seed * 83 + i * 29, { detail: 2, rough: 0.5, tall: 0.55 })
+        .scale(sc * 2.0, sc * 0.9, sc * 2.0)
+        .rotateY(a * 1.3), 0.4 * sc);
+      g.translate(Math.cos(a) * (4.6 + i * 0.4), 0, Math.sin(a) * (4.2 + i * 0.35));
+      parts.push(g);
+    }
+    return { geometry: mergeGeometries(parts), radius: 3.9, height: h };
+  }
+
+  /**
    * Loose stone and dry brush across the flats. Instanced, so the whole layer
    * costs two draw calls no matter how many objects are in it.
    */
   _buildScatter() {
     const rng = new RNG(90210);
     const out = [];
+    // Counts scale with area, not radius — a 1.4x wider arena is a 2x bigger
+    // floor, and the same scatter spread over it reads as emptier than before.
     const specs = [
-      { geo: buildPebble(3), count: 150, mat: this.pillarMat, lo: 0.16, hi: 0.72, edge: true },
-      { geo: buildScrub(11), count: 110, mat: createNovaMaterial({ rim: 0.2, spec: 0.04, rimColor: 0xffd0a0 }), lo: 0.7, hi: 1.5, edge: false },
+      { geo: buildPebble(3), count: 330, mat: this.pillarMat, lo: 0.16, hi: 0.9, edge: true },
+      { geo: buildPebble(19), count: 90, mat: this.pillarMat, lo: 0.9, hi: 2.2, edge: true },
+      { geo: buildScrub(11), count: 260, mat: createNovaMaterial({ rim: 0.2, spec: 0.04, rimColor: 0xffd0a0 }), lo: 0.7, hi: 1.7, edge: false },
     ];
     this._scatterGeos = [];
     this._scatterMats = [];
@@ -204,7 +254,7 @@ export class World {
       for (let i = 0; i < spec.count; i++) {
         const a = rng.next() * TAU;
         // biased outward: the middle of the arena has to stay clear to fight in
-        const r = lerp(6, this.radius + 0.5, Math.pow(rng.next(), 0.55));
+        const r = lerp(5, this.radius + 0.5, Math.pow(rng.next(), 0.55));
         const s = rng.range(spec.lo, spec.hi);
         // A tumbled pebble has no "down" face, so it is sunk rather than seated:
         // half-buried always reads as resting, at any orientation.
@@ -381,6 +431,19 @@ export class World {
 
   update(dt, playerPos, coreGlow = 0) {
     this.time += dt;
+
+    // Walk the shadow frustum along with the player. Snapped to whole shadow
+    // texels first: an unsnapped moving frustum makes every shadow edge crawl
+    // and shimmer as the map slides under it, which is far more distracting
+    // than the softness a bigger fixed box would have cost.
+    if (playerPos && this.sun.castShadow) {
+      const texel = (SHADOW_SPAN * 2) / this.sun.shadow.mapSize.x;
+      const sx = Math.round(playerPos.x / texel) * texel;
+      const sz = Math.round(playerPos.z / texel) * texel;
+      this.sun.position.set(sx + SUN_OFFSET.x, SUN_OFFSET.y, sz + SUN_OFFSET.z);
+      this.sun.target.position.set(sx, 0, sz);
+      this.sun.target.updateMatrixWorld();
+    }
     const u = this.floorMat.uniforms;
     this.threat = lerp(this.threat, this.targetThreat, clamp01(dt * 1.2));
     u.uThreat.value = this.threat;

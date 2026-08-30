@@ -616,8 +616,12 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
       window.__NOVA.step(1 / 60, 10);
     });
 
-    // drag the movement stick and confirm the ship actually accelerates
-    const stick = await tp.locator('#stick-move').boundingBox();
+    // drag the movement stick and confirm the ship actually accelerates.
+    // The wait is explicit: by this point the suite has run a whole campaign in
+    // the sibling context, and a page under that much memory pressure can take
+    // well over Playwright's default to answer.
+    await tp.locator('#stick-move').waitFor({ state: 'visible', timeout: 60000 });
+    const stick = await tp.locator('#stick-move').boundingBox({ timeout: 60000 });
     const before = await tp.evaluate(() => ({ x: window.__NOVA.game.player.position.x, z: window.__NOVA.game.player.position.z }));
     await tp.mouse.move(stick.x + stick.width / 2, stick.y + stick.height / 2);
     await tp.mouse.down();
@@ -638,7 +642,7 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
       `${travelled.toFixed(1)} along camera-right (dx=${(after.x - before.x).toFixed(1)} dz=${(after.z - before.z).toFixed(1)})`);
 
     // aim stick should both aim and open fire
-    const astick = await tp.locator('#stick-aim').boundingBox();
+    const astick = await tp.locator('#stick-aim').boundingBox({ timeout: 60000 });
     await tp.mouse.move(astick.x + astick.width / 2, astick.y + astick.height / 2);
     await tp.mouse.down();
     await tp.mouse.move(astick.x + astick.width / 2 - 40, astick.y + astick.height / 2, { steps: 4 });
@@ -820,6 +824,64 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
   }
 
   // ---------------- camera rigs ----------------
+  section('CONTROL SCHEME');
+  {
+    const drive = await page.evaluate(() => {
+      const N = window.__NOVA;
+      const run = (scheme, deg) => {
+        N.game.setSetting('controlScheme', scheme);
+        N.game.setSetting('cameraStyle', 'pov');
+        N.start('striker', 'pilot', 'campaign', 4);
+        N.skipCinematic();
+        N.godMode(true);
+        const a = deg * Math.PI / 180;
+        // the LEFT stick only: no aim input of any kind
+        N.setInput({ move: { x: Math.sin(a), z: -Math.cos(a) } });
+        N.killAll();
+        N.step(1 / 60, 45);
+        const p = N.game.player;
+        const want = Math.atan2(Math.sin(a), -Math.cos(a)) * 180 / Math.PI;
+        let off = p.yaw * 180 / Math.PI - want;
+        while (off > 180) off -= 360;
+        while (off < -180) off += 360;
+        N.clearInput();
+        return +off.toFixed(1);
+      };
+      const idle = () => {
+        N.game.setSetting('controlScheme', 'drive');
+        N.start('striker', 'pilot', 'campaign', 4);
+        N.skipCinematic();
+        N.godMode(true);
+        N.setWave(4);
+        N.step(1 / 60, 60);
+        const before = N.game.player.yaw;
+        N.setInput({ move: { x: 0, z: 0 } });
+        N.step(1 / 60, 180);
+        let d = N.game.player.yaw - before;
+        while (d > Math.PI) d -= Math.PI * 2;
+        while (d < -Math.PI) d += Math.PI * 2;
+        N.clearInput();
+        return +(d * 180 / Math.PI).toFixed(1);
+      };
+      return {
+        driveOff: [0, 45, 135, -90, 170].map((d) => ({ deg: d, off: run('drive', d) })),
+        freeOff: run('freeaim', 45),
+        idleDrift: idle(),
+      };
+    });
+    console.log('    drive, nose vs stick:', drive.driveOff.map((r) => `${r.deg}deg->${r.off}`).join(' '));
+    // The whole point of the scheme: from a low camera the nose is the only
+    // heading cue there is, so it has to point where the throttle points.
+    check('drive: the ship points where the left stick points',
+      drive.driveOff.every((r) => Math.abs(r.off) < 2),
+      drive.driveOff.map((r) => `${r.deg}deg off by ${r.off}`).join(', '));
+    check('free aim: movement does not steer the ship', Math.abs(drive.freeOff) > 20,
+      `off by ${drive.freeOff}deg`);
+    // Aim assist must not fly the ship for you.
+    check('an idle ship does not turn on its own', Math.abs(drive.idleDrift) < 3,
+      `drifted ${drive.idleDrift}deg over 3s with no input`);
+  }
+
   section('WORLD GROUNDING');
   {
     const ground = await page.evaluate(() => {
@@ -861,6 +923,61 @@ async function runSuite(page, consoleErrors, consoleWarnings, url) {
     // under it: above and it clips entities, far below and they hover.
     check('the floor stays just under the entity plane', ground.floorHi <= 0.02 && ground.floorLo > -0.6,
       `${ground.floorLo} .. ${ground.floorHi}`);
+  }
+
+  section('CAMERA COLLISION');
+  {
+    const occ = await page.evaluate(() => {
+      const N = window.__NOVA, g = N.game;
+      g.setSetting('cameraStyle', 'pov');
+      N.start('striker', 'pilot', 'campaign', 4);
+      N.skipCinematic();
+      N.godMode(true);
+      N.step(1 / 60, 30);
+      const obs = g.world.obstacles;
+      const cam = g.camera;
+      let inside = 0, blocked = 0, tested = 0;
+      const worst = [];
+      for (const ob of obs) {
+        for (const bearing of [0, 1.2, 2.4, 3.6, 4.8]) {
+          // Park the ship against the rock, on every side of it, then settle
+          // the rig on its own. Driving the whole simulation for this would
+          // cost thousands of frames and prove nothing extra — the question is
+          // purely about where the rig puts itself.
+          const d = ob.r + 3;
+          g.player.position.set(ob.x + Math.cos(bearing) * d, 1.05, ob.z + Math.sin(bearing) * d);
+          g.player.velocity.set(0, 0, 0);
+          cam.snapTo(g.player.position.x, g.player.position.z, g.player.yaw);
+          for (let i = 0; i < 200; i++) {
+            cam.follow(g.player, null, 1 / 60, null, 0, null, g.player.yaw);
+          }
+          tested++;
+          const c = cam.camera.position, p = g.player.position;
+          for (const o of obs) {
+            if (o.height !== undefined && c.y > o.height) continue;
+            if (Math.hypot(c.x - o.x, c.z - o.z) < o.r - 0.3) {
+              inside++; worst.push(`inside rock at ${o.x.toFixed(0)},${o.z.toFixed(0)}`); break;
+            }
+          }
+          const vx = p.x - c.x, vz = p.z - c.z, vy = p.y - c.y;
+          const len = Math.hypot(vx, vz);
+          for (const o of obs) {
+            const t = ((o.x - c.x) * vx + (o.z - c.z) * vz) / (len * len);
+            if (t <= 0.02 || t >= 0.98) continue;
+            if (Math.hypot(c.x + vx * t - o.x, c.z + vz * t - o.z) > o.r) continue;
+            if (o.height !== undefined && o.height < c.y + vy * t) continue;
+            blocked++; worst.push(`ship hidden behind ${o.x.toFixed(0)},${o.z.toFixed(0)}`); break;
+          }
+        }
+      }
+      return { tested, inside, blocked, worst: worst.slice(0, 3) };
+    });
+    console.log(`    ${occ.tested} placements: ${occ.inside} with the camera in rock, ${occ.blocked} with the ship hidden`);
+    // The arena is full of standing rock now. A rig that ignores it spends half
+    // a fight inside a butte, so the boom winds in, the eye climbs, and failing
+    // both the rig steps around — see GameCamera._solveBoom.
+    check('the camera never ends up inside rock', occ.inside === 0, occ.worst.join(', '));
+    check('the ship is never hidden behind rock', occ.blocked === 0, occ.worst.join(', '));
   }
 
   section('CAMERA RIGS');

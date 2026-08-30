@@ -941,6 +941,10 @@ const DEFAULT_SETTINGS = {
   showPerf: false,
   cameraRotate: true,   // camera eases toward aim direction
   cameraStyle: 'pov',   // pov | chase | tactical (see render/camera.js)
+  // drive   — the left stick steers: the ship points where it is going, and the
+  //           right stick only shoots (push it to aim, ignore it to fire ahead)
+  // freeaim — classic twin-stick: the right stick sets facing, the left strafes
+  controlScheme: 'drive',
 };
 
 const DEFAULT_RECORD = {
@@ -1107,7 +1111,7 @@ class AudioEngine {
     this._step = 0;
     this._nextNoteTime = 0;
     this._timer = null;
-    this._bpm = 124;
+    this._bpm = 104;
     this._mode = 'menu';       // menu | combat | boss | victory | defeat
     this._duckUntil = 0;
     this.offline = false;
@@ -1308,6 +1312,48 @@ class AudioEngine {
     g.linearRampToValueAtTime(this.musicVol, t + time);
   }
 
+  /**
+   * A firearm report, built the way one is actually shaped.
+   *
+   *   crack  the supersonic snap off the bullet. Sub-millisecond attack, mostly
+   *          high frequency. This is the part that says "gun" rather than
+   *          "thud", and it is the part a pitch-swept oscillator cannot fake.
+   *   body   the muzzle blast — the low end you feel in your chest.
+   *   tail   the report coming back off the canyon a moment later. The send to
+   *          the convolution reverb does the rest.
+   *
+   * The old cue was a sawtooth sweeping 900Hz down to 290Hz: a textbook sci-fi
+   * laser, which is exactly what it sounded like in a western.
+   */
+  _gunshot(o) {
+    const v = o.gain !== undefined ? o.gain : 1;
+    const p = o.pitch || 1;
+    const t0 = this._now();
+    const jitter = 0.94 + Math.random() * 0.12;   // no two rounds identical
+    // The crack has to be loud as well as high: a highpass throws most of the
+    // noise away, so a gain that looks large here is not one you hear.
+    this._noiseBurst({
+      filter: 'highpass', f0: 3000 * p * jitter, f1: 1400 * p, q: 0.5,
+      dur: o.crackDur || 0.05, gain: 0.95 * v * (o.crack !== undefined ? o.crack : 1),
+      attack: 0.0005, at: t0,
+    });
+    this._noiseBurst({
+      filter: 'lowpass', f0: 1150 * p, f1: 190, q: 0.8,
+      dur: o.bodyDur || 0.11, gain: 0.20 * v, attack: 0.0008, at: t0,
+    });
+    this._tone({
+      type: 'sine', f0: (o.thump || 155) * p * jitter, f1: 46,
+      dur: (o.bodyDur || 0.11) * 1.2, gain: 0.19 * v, attack: 0.0008, at: t0,
+    });
+    if (o.tail !== 0) {
+      this._noiseBurst({
+        filter: 'lowpass', f0: 1500, f1: 250, q: 0.6,
+        dur: o.tailDur || 0.42, gain: 0.07 * v * (o.tail || 1),
+        attack: 0.022, at: t0 + 0.012,
+      });
+    }
+  }
+
   // ======================================================================
   //  SFX library
   // ======================================================================
@@ -1318,59 +1364,84 @@ class AudioEngine {
     switch (name) {
       case 'shoot': {
         if (!this._gate('shoot', 0.028)) return;
-        const f = 900 * p * (0.94 + Math.random() * 0.12);
-        this._tone({ type: 'sawtooth', f0: f, f1: f * 0.32, dur: 0.12, gain: 0.30 * v, filter: 'bandpass', cutoff0: f * 1.5, cutoff1: f * 0.7, q: 1.5 });
-        this._noiseBurst({ f0: 2600, f1: 800, dur: 0.06, gain: 0.14 * v, q: 0.8 });
+        // Rapid fire only gets a tail every few rounds: real reports blur into
+        // one another, and four voices per shot at 35 rounds a second would
+        // eat the whole voice budget on its own.
+        // start at 0 so a single tapped shot gets its tail — the case where
+        // you most notice its absence
+        this._shotN = this._shotN === undefined ? 0 : (this._shotN + 1) % 3;
+        // held back a little: this fires several times a second, and at parity
+        // with the explosion cue it pumps the limiter on its own
+        this._gunshot({
+          gain: v * 0.76, pitch: p * 1.15, crackDur: 0.042, bodyDur: 0.085,
+          thump: 172, tail: this._shotN === 0 ? 1 : 0, tailDur: 0.34,
+        });
         break;
       }
       case 'shootHeavy': {
         if (!this._gate('shootHeavy', 0.04)) return;
-        this._tone({ type: 'square', f0: 420 * p, f1: 120, dur: 0.16, gain: 0.2 * v, filter: 'lowpass', cutoff0: 2200, cutoff1: 500, q: 3 });
-        this._noiseBurst({ f0: 1800, f1: 300, dur: 0.13, gain: 0.13 * v });
+        // buffalo rifle: less crack, far more body, and a tail that rolls
+        this._gunshot({
+          gain: v * 1.15, pitch: p * 0.68, crack: 0.8, crackDur: 0.06,
+          bodyDur: 0.19, thump: 104, tail: 1.6, tailDur: 0.7,
+        });
+        this.duck(0.14, 0.3);
         break;
       }
       case 'enemyShoot': {
         if (!this._gate('enemyShoot', 0.05)) return;
-        this._tone({ type: 'square', f0: 320 * p, f1: 140 * p, dur: 0.15, gain: 0.19 * v, filter: 'bandpass', cutoff0: 520, cutoff1: 220, q: 1.2 });
+        // heard from across the arena: the crack thins out, the tail does not
+        this._gunshot({
+          gain: v * 0.72, pitch: p * 0.86, crack: 0.45, crackDur: 0.05,
+          bodyDur: 0.1, thump: 132, tail: 1.3, tailDur: 0.5,
+        });
         break;
       }
       case 'hit': {
         if (!this._gate('hit', 0.022)) return;
-        this._noiseBurst({ f0: 2200 * p, f1: 620, dur: 0.06, gain: 0.20 * v, q: 1.1 });
-        this._tone({ type: 'triangle', f0: 560 * p, f1: 200, dur: 0.06, gain: 0.13 * v });
+        // lead into hide and timber: a dull thwack, no ring
+        this._noiseBurst({ filter: 'bandpass', f0: 1500 * p, f1: 420, dur: 0.055, gain: 0.21 * v, attack: 0.0008, q: 1.0 });
+        this._tone({ type: 'triangle', f0: 300 * p, f1: 120, dur: 0.07, gain: 0.13 * v, attack: 0.001 });
         break;
       }
       case 'crit': {
         if (!this._gate('crit', 0.03)) return;
-        this._noiseBurst({ f0: 4200, f1: 1200, dur: 0.10, gain: 0.22 * v, q: 1.4 });
-        this._tone({ type: 'triangle', f0: 1500, f1: 620, dur: 0.14, gain: 0.17 * v });
-        this._tone({ type: 'triangle', f0: 2260, f1: 940, dur: 0.11, gain: 0.10 * v, detune: 9 });
+        // a spang off iron, with the ricochet whine going away from you
+        this._noiseBurst({ filter: 'highpass', f0: 4600, f1: 1500, dur: 0.07, gain: 0.22 * v, attack: 0.0005, q: 0.9 });
+        this._tone({ type: 'triangle', f0: 2400 * p, f1: 700, dur: 0.26, gain: 0.12 * v, attack: 0.002 });
+        this._tone({ type: 'sine', f0: 1750 * p, f1: 520, dur: 0.30, gain: 0.07 * v, attack: 0.003, detune: 14 });
         break;
       }
       case 'kill': {
         if (!this._gate('kill', 0.035)) return;
-        this._noiseBurst({ f0: 1500, f1: 180, dur: 0.28, gain: 0.17 * v, filter: 'lowpass', q: 0.8 });
-        this._tone({ type: 'sine', f0: 240, f1: 48, dur: 0.3, gain: 0.2 * v });
+        // something heavy going down, and the dust it kicks up
+        this._tone({ type: 'sine', f0: 190, f1: 40, dur: 0.34, gain: 0.21 * v, attack: 0.002 });
+        this._noiseBurst({ filter: 'lowpass', f0: 900, f1: 130, dur: 0.34, gain: 0.16 * v, attack: 0.004, q: 0.7 });
         break;
       }
       case 'explosion': {
+        // dynamite: a blast, then the report off the walls, then falling rock
         const size = opts.size || 1;
-        this._noiseBurst({ f0: 1100 * (1 / size), f1: 90, dur: 0.5 * size, gain: 0.3 * v, filter: 'lowpass', q: 0.7 });
-        this._tone({ type: 'sine', f0: 180 / size, f1: 32, dur: 0.6 * size, gain: 0.34 * v });
-        this._noiseBurst({ f0: 5000, f1: 1200, dur: 0.1, gain: 0.14 * v });
-        this.duck(0.28, 0.4);
+        const t0 = this._now();
+        this._noiseBurst({ filter: 'highpass', f0: 3800, f1: 900, dur: 0.06, gain: 0.20 * v, attack: 0.0006, at: t0 });
+        this._tone({ type: 'sine', f0: 150 / size, f1: 28, dur: 0.6 * size, gain: 0.36 * v, attack: 0.002, at: t0 });
+        this._noiseBurst({ filter: 'lowpass', f0: 900 / size, f1: 70, dur: 0.55 * size, gain: 0.30 * v, attack: 0.003, q: 0.7, at: t0 });
+        this._noiseBurst({ filter: 'bandpass', f0: 2600, f1: 700, dur: 0.5 * size, gain: 0.07 * v, attack: 0.09, q: 0.9, at: t0 + 0.07 });
+        this.duck(0.28, 0.45);
         break;
       }
       case 'dash': {
-        this._noiseBurst({ f0: 400, f1: 3600, dur: 0.18, gain: 0.30 * v, q: 1.0 });
-        this._tone({ type: 'sine', f0: 420, f1: 90, dur: 0.26, gain: 0.22 * v });
+        // spur and a whip crack, then the surge
+        this._noiseBurst({ filter: 'highpass', f0: 6000, f1: 2200, dur: 0.035, gain: 0.26 * v, attack: 0.0005, q: 0.8 });
+        this._noiseBurst({ filter: 'bandpass', f0: 500, f1: 2600, dur: 0.2, gain: 0.20 * v, attack: 0.01, q: 1.0 });
+        this._tone({ type: 'sine', f0: 260, f1: 80, dur: 0.28, gain: 0.18 * v, attack: 0.004 });
         break;
       }
       case 'pulse': {
-        this._tone({ type: 'sine', f0: 150, f1: 34, dur: 0.55, gain: 0.42 * v });
-        this._noiseBurst({ f0: 260, f1: 3400, dur: 0.3, gain: 0.2 * v, q: 0.8 });
-        this._tone({ type: 'sawtooth', f0: 220, f1: 880, dur: 0.22, gain: 0.11 * v, filter: 'lowpass', cutoff0: 500, cutoff1: 3000 });
-        this.duck(0.3, 0.4);
+        // both barrels at once
+        this._gunshot({ gain: v * 1.3, pitch: 0.55, crack: 1.1, crackDur: 0.07, bodyDur: 0.26, thump: 82, tail: 2.0, tailDur: 0.9 });
+        this._tone({ type: 'sine', f0: 120, f1: 30, dur: 0.5, gain: 0.30 * v, attack: 0.003 });
+        this.duck(0.3, 0.45);
         break;
       }
       case 'pulseFail':
@@ -1531,9 +1602,20 @@ class AudioEngine {
   // ======================================================================
   //  Generative soundtrack
   // ======================================================================
+  /** Tempo per mode. A spaghetti-western vamp walks; it does not sprint. */
+  _tempoFor(mode) {
+    if (mode === 'boss') return 118;
+    if (mode === 'combat') return 104;
+    return 76;
+  }
+
   startMusic(mode = 'menu') {
     if (!this.ready) return;
     this._mode = mode;
+    // Set the tempo here too. setMusicMode early-returns when the mode has not
+    // changed, so starting straight into a mode used to inherit whatever bpm
+    // happened to be left over from the last one.
+    this._bpm = this._tempoFor(mode);
     this.musicOn = true;
     this.musBus.gain.setTargetAtTime(this.musicVol, this.ctx.currentTime, 0.4);
     if (this._timer) return;
@@ -1552,9 +1634,7 @@ class AudioEngine {
   setMusicMode(mode) {
     if (this._mode === mode) return;
     this._mode = mode;
-    if (mode === 'boss') this._bpm = 138;
-    else if (mode === 'combat') this._bpm = 124;
-    else this._bpm = 96;
+    this._bpm = this._tempoFor(mode);
   }
 
   setIntensity(v) { this._targetIntensity = clamp01(v); }
@@ -1573,9 +1653,25 @@ class AudioEngine {
     this.intensity = lerp(this.intensity, this._targetIntensity, 0.06);
   }
 
+  /**
+   * One 16th-note step of the score.
+   *
+   * The harmony was always right for this — a natural-minor vamp is where
+   * spaghetti westerns live — but the voicing was a synthwave kit: four-on-the
+   * floor drums, a resonant sawtooth bass and a random arpeggio. Over a desert
+   * that reads as parody. Same chords, rebuilt as instruments instead:
+   *
+   *   guitar   plucked chord tones, hard attack and a fast decay through a
+   *            closing lowpass, with a noise transient for the pick
+   *   bass     upright: a short round triangle on the root, no filter sweep
+   *   perc     a low hand drum and a woodblock rather than a kick and snare,
+   *            with a gallop pattern when the fight gets going
+   *   lead     two detuned reeds through a bandpass, held long — a harmonica
+   *            phrase, sparse enough to leave room for the gunfire
+   *   drone    a quiet sustained low bed, the only survivor of the old pads
+   */
   _scheduleStep(step, t, stepDur) {
     const bar = Math.floor(step / 16);
-    const beat = Math.floor((step % 16) / 4);
     const six = step % 16;
     const prog = PROGRESSION[bar % PROGRESSION.length];
     const I = this.intensity;
@@ -1583,57 +1679,88 @@ class AudioEngine {
     const menu = this._mode === 'menu';
     const dest = this.musBus;
 
-    // ---- drums ----
+    // ---- percussion ----
     if (!menu) {
-      const kickOn = six === 0 || six === 6 || (I > 0.45 && six === 10) || (boss && six === 14);
-      if (kickOn) {
-        this._tone({ type: 'sine', f0: 150, f1: 42, dur: 0.24, gain: 0.5, at: t, dest, attack: 0.002 });
-        this._noiseBurst({ f0: 120, f1: 60, dur: 0.06, gain: 0.12, at: t, dest, filter: 'lowpass' });
+      // low hand drum: steady on the half-bar, gallop when the pressure is on
+      const gallop = boss || I > 0.55;
+      const drumOn = six === 0 || six === 8 || (gallop && (six === 3 || six === 11)) || (boss && six === 14);
+      if (drumOn) {
+        const deep = six === 0 || six === 8;
+        this._tone({
+          type: 'sine', f0: deep ? 96 : 128, f1: deep ? 44 : 62,
+          dur: deep ? 0.3 : 0.16, gain: deep ? 0.33 : 0.18, at: t, dest, attack: 0.003,
+        });
+        this._noiseBurst({ filter: 'lowpass', f0: 320, f1: 90, dur: 0.07, gain: 0.07, at: t, dest, q: 0.7 });
       }
+      // woodblock on the backbeat — dry, wooden, no snare rattle
       if (six === 4 || six === 12) {
-        this._noiseBurst({ f0: 1900, f1: 700, dur: 0.16, gain: 0.16 + I * 0.1, at: t, dest, q: 0.9 });
-        this._tone({ type: 'triangle', f0: 320, f1: 180, dur: 0.1, gain: 0.1, at: t, dest });
+        this._noiseBurst({ filter: 'bandpass', f0: 2400, f1: 1500, dur: 0.045, gain: 0.11 + I * 0.05, at: t, dest, q: 3.2, attack: 0.0008 });
+        this._tone({ type: 'triangle', f0: 1150, f1: 800, dur: 0.05, gain: 0.06, at: t, dest, attack: 0.001 });
       }
-      if (I > 0.28 && step % 2 === 0) {
-        this._noiseBurst({ f0: 8200, f1: 6000, dur: 0.035, gain: 0.035 + I * 0.03, at: t, dest, filter: 'highpass', q: 0.7 });
-      }
-      if (I > 0.7 && six === 15 && Math.random() < 0.5) {
-        this._noiseBurst({ f0: 3000, f1: 9000, dur: 0.22, gain: 0.07, at: t, dest, q: 0.6 });
+      // shaker, only once the fight is moving
+      if (I > 0.3 && step % 2 === 1) {
+        this._noiseBurst({ filter: 'highpass', f0: 7000, f1: 5200, dur: 0.03, gain: 0.022 + I * 0.02, at: t, dest, q: 0.7 });
       }
     }
 
-    // ---- bass ----
+    // ---- upright bass ----
     if (!menu || I > 0.1) {
-      const pattern = boss ? [0, 3, 6, 8, 11, 14] : [0, 6, 8, 14];
-      if (pattern.includes(six)) {
-        const oct = six === 0 ? 0 : (Math.random() < 0.22 ? 12 : 0);
+      const walk = boss ? [0, 4, 8, 12] : [0, 8];
+      if (walk.includes(six) || (I > 0.5 && six === 14)) {
+        const fifth = six === 14 || (boss && six === 12);
         this._tone({
-          type: 'sawtooth', f0: NOTE(prog.root - 12 + oct), dur: stepDur * (six === 0 ? 3.4 : 1.8),
-          gain: 0.16 + I * 0.1, at: t, dest, filter: 'lowpass',
-          cutoff0: 220 + I * 900, cutoff1: 160 + I * 400, q: 6, expo: false,
+          type: 'triangle', f0: NOTE(prog.root - 12 + (fifth ? 7 : 0)),
+          dur: stepDur * 3.2, gain: 0.20 + I * 0.06, at: t, dest, attack: 0.006,
+          filter: 'lowpass', cutoff0: 520, cutoff1: 260, q: 1.1, expo: false,
         });
       }
     }
 
-    // ---- arp / lead ----
-    const arpDensity = menu ? 0.16 : 0.3 + I * 0.5;
-    if (step % 2 === 0 && Math.random() < arpDensity) {
-      const deg = SCALE[Math.floor(Math.random() * SCALE.length)];
-      const oct = Math.random() < 0.35 ? 12 : 0;
-      this._tone({
-        type: boss ? 'square' : 'triangle', f0: NOTE(prog.root + 12 + deg + oct),
-        dur: stepDur * 1.6, gain: (menu ? 0.055 : 0.05 + I * 0.05), at: t, dest,
-        filter: 'bandpass', cutoff0: 1400 + I * 2200, q: 2.6,
-      });
+    // ---- guitar ----
+    // Eighth notes through the chord, which is the figure the whole genre runs
+    // on. Deterministic rather than random: a fixed arpeggio is what makes it
+    // sound played rather than generated.
+    if (step % 2 === 0) {
+      const idx = (step / 2) % 4;
+      const shape = [0, 1, 2, 1];               // root, third, fifth, third
+      const note = prog.chord[shape[idx]] + 12;
+      const play = menu ? (six % 8 === 0) : (I > 0.22 || six % 4 === 0);
+      if (play) {
+        const g = menu ? 0.085 : 0.075 + I * 0.045;
+        this._noiseBurst({ filter: 'highpass', f0: 3600, f1: 2000, dur: 0.02, gain: g * 0.5, at: t, dest, q: 0.8, attack: 0.0005 });
+        this._tone({
+          type: 'triangle', f0: NOTE(note), dur: stepDur * 3.4, gain: g, at: t, dest,
+          attack: 0.002, filter: 'lowpass', cutoff0: 2600, cutoff1: 700, q: 1.4,
+        });
+        // a second string an octave down on the downbeat, for body
+        if (six === 0 || six === 8) {
+          this._tone({
+            type: 'triangle', f0: NOTE(note - 12), dur: stepDur * 3.0, gain: g * 0.6, at: t, dest,
+            attack: 0.003, filter: 'lowpass', cutoff0: 1500, cutoff1: 500, q: 1.2, detune: -4,
+          });
+        }
+      }
     }
 
-    // ---- pad (bar changes) ----
+    // ---- harmonica lead ----
+    // Sparse by design: it has to sit above the mix without competing with the
+    // gunfire, so it only speaks at phrase boundaries.
+    const leadAt = boss ? (six === 0 || six === 10) : (six === 0 && bar % 2 === 1);
+    if (leadAt && (menu ? bar % 2 === 0 : I > 0.18)) {
+      const deg = SCALE[[0, 2, 4, 6][bar % 4]];
+      const f = NOTE(prog.root + 12 + deg);
+      const g = (menu ? 0.05 : 0.035 + I * 0.04);
+      const dur = stepDur * (boss ? 6 : 11);
+      // two reeds slightly apart: the beating between them is the sound
+      this._tone({ type: 'square', f0: f, dur, gain: g, at: t, dest, attack: 0.09, detune: -9, filter: 'bandpass', cutoff0: 1500, q: 2.2 });
+      this._tone({ type: 'square', f0: f, dur, gain: g * 0.9, at: t, dest, attack: 0.13, detune: 11, filter: 'bandpass', cutoff0: 1900, q: 2.6 });
+    }
+
+    // ---- drone ----
     if (six === 0) {
-      const padGain = menu ? 0.05 : 0.028 + I * 0.03;
-      for (const n of prog.chord) {
-        this._tone({ type: 'sawtooth', f0: NOTE(n), dur: stepDur * 15, gain: padGain, at: t, dest, attack: 0.5, detune: -6, filter: 'lowpass', cutoff0: 420 + I * 700, q: 1.5, expo: false });
-        this._tone({ type: 'sawtooth', f0: NOTE(n), dur: stepDur * 15, gain: padGain, at: t, dest, attack: 0.6, detune: 7, filter: 'lowpass', cutoff0: 380 + I * 600, q: 1.5, expo: false });
-      }
+      const droneGain = menu ? 0.045 : 0.026 + I * 0.022;
+      this._tone({ type: 'sawtooth', f0: NOTE(prog.root - 24), dur: stepDur * 15, gain: droneGain, at: t, dest, attack: 0.6, filter: 'lowpass', cutoff0: 240 + I * 220, q: 1.2, expo: false });
+      this._tone({ type: 'sawtooth', f0: NOTE(prog.root - 12), dur: stepDur * 15, gain: droneGain * 0.7, at: t, dest, attack: 0.8, detune: 6, filter: 'lowpass', cutoff0: 300 + I * 260, q: 1.2, expo: false });
       if (boss) {
         this._tone({ type: 'sawtooth', f0: NOTE(prog.root - 24), dur: stepDur * 16, gain: 0.1, at: t, dest, attack: 0.3, filter: 'lowpass', cutoff0: 180, q: 3, expo: false });
       }
@@ -1678,7 +1805,11 @@ class Input {
     this.move = { x: 0, z: 0 };
     // rawX/rawZ are the stick's own axes; dirX/dirZ are those rotated into
     // world space each frame against the camera basis (see sample).
-    this.aim = { mode: 'pointer', screenX: 0, screenY: 0, dirX: 0, dirZ: -1, rawX: 0, rawZ: -1, active: false };
+    // `active` latches once anything has aimed; `held` is true only while an
+    // aim stick is actually being pushed this frame. The drive scheme needs the
+    // second one — it hands the nose back to the throttle the moment you let
+    // go, and a latched flag can never say that.
+    this.aim = { mode: 'pointer', screenX: 0, screenY: 0, dirX: 0, dirZ: -1, rawX: 0, rawZ: -1, active: false, held: false };
     this.fire = false;
     this.firePulse = false;      // "pulse" as in secondary weapon, held
     this.dashEdge = false;
@@ -1849,6 +1980,7 @@ class Input {
   sample(dt, rigYaw = Math.PI) {
     if (this.suppress > 0) this.suppress -= dt;
     const locked = !this.enabled || this.suppress > 0;
+    this.aim.held = false;
 
     let mx = 0, mz = 0;
     if (!locked) {
@@ -1888,6 +2020,7 @@ class Input {
         this.aim.mode = 'stick';
         this.aim.rawX = rx / rr; this.aim.rawZ = ry / rr;
         this.aim.active = true;
+        this.aim.held = true;
         fire = true;                                   // twin-stick: aiming shoots
       }
       const btn = (i) => !!(pad.buttons[i] && pad.buttons[i].pressed);
@@ -1922,6 +2055,7 @@ class Input {
           this.aim.mode = 'stick';
           this.aim.rawX = sa.x / l; this.aim.rawZ = sa.z / l;
           this.aim.active = true;
+          this.aim.held = true;
           fire = true;
         }
       }
@@ -1944,6 +2078,7 @@ class Input {
       if (al > 0.001) {
         this.aim.mode = 'stick';
         this.aim.active = true;
+        this.aim.held = true;
         this.aim.rawX = ov.aimStick.x / al;
         this.aim.rawZ = ov.aimStick.z / al;
       }
@@ -1977,6 +2112,7 @@ class Input {
       if (o.aim) {
         this.aim.mode = 'stick';
         this.aim.active = true;
+        this.aim.held = true;
         this.aim.dirX = o.aim.x;
         this.aim.dirZ = o.aim.z;
       }
@@ -3222,7 +3358,7 @@ function createFloorMaterial() {
           vec3 fr2 = cross(normal, fpx);
           float fdt = dot(fpx, fr1);
           vec3 fgrad = sign(fdt) * (dFdx(fh) * fr1 + dFdy(fh) * fr2);
-          normal = normalize(abs(fdt) * normal - 0.11 * fdetail * fgrad);
+          normal = normalize(abs(fdt) * normal - 0.075 * fdetail * fgrad);
         }`)
       .replace('#include <emissivemap_fragment>', `
         totalEmissiveRadiance += uAccent * uCoreGlow * 0.04 * exp(-frad * 0.09);
@@ -4261,6 +4397,8 @@ function buildRock(seed = 1, opts = {}) {
   // bedding planes: how many ledges run around the body
   const beds = opts.beds === undefined ? 3.0 + rnd() * 3.5 : opts.beds;
   const ledge = opts.ledge === undefined ? 0.34 : opts.ledge;
+  // 0 = no cap; otherwise the height (in unit space) the top is sheared off at
+  const flatTop = opts.flatTop === undefined ? 0 : opts.flatTop;
 
   // Fracture planes. Stone breaks along flat faces with hard edges between
   // them; noise alone only ever produces blobs. Slicing the displaced body
@@ -4299,6 +4437,10 @@ function buildRock(seed = 1, opts = {}) {
       const t = v.x * P.nx + v.y * P.ny + v.z * P.nz - P.d * (tall + wide) * 0.5;
       if (t > 0) { v.x -= P.nx * t; v.y -= P.ny * t; v.z -= P.nz * t; }
     }
+    // A flat cap. What separates a butte from a boulder is that erosion took
+    // the soft rock and left a hard horizontal layer on top; without the cut
+    // the same noise just makes a lump.
+    if (flatTop > 0 && v.y > flatTop * tall) v.y = flatTop * tall;
     // a flat bottom, so it sits in the ground on a face instead of on a point
     if (v.y < -0.12 * tall) v.y = -0.12 * tall;
     pos.setXYZ(i, v.x, v.y, v.z);
@@ -4361,8 +4503,11 @@ function buildGround(playRadius = 46, outerRadius = 150) {
     // and ground that dips far below it leaves them hanging in the air.
     const inner = fbm3(x * 0.035, 0.5, z * 0.035, 3) - 0.5;
     let h = -0.07 + inner * 0.18;
-    // beyond the play area the ground lifts into the canyon's base
-    const out = clamp01((rad - playRadius * 0.92) / 26);
+    // Beyond the play area the ground lifts into the canyon's base. The ramp
+    // has to start at the boundary, not inside it: on a small arena 0.92x was
+    // close enough, but scaled up it began several units early and pushed the
+    // ground up through the plane the ship sits on.
+    const out = clamp01((rad - playRadius) / 30);
     h += out * out * 9.5 * (0.55 + fbm3(x * 0.02, 3.1, z * 0.02, 3) * 0.9);
     // dry washes cut across the flats, shallow enough to keep contact
     const wash = ridge3(x * 0.017, 7.7, z * 0.017, 3);
@@ -4536,7 +4681,7 @@ function buildCanyon(radius = 46, seed = 7) {
 function buildMesaBelt(seed = 21) {
   const rnd = mulberry(seed);
   const parts = [];
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < 38; i++) {
     const geo = buildRock(seed * 31 + i, {
       detail: 2,
       rough: 0.30,
@@ -4544,8 +4689,8 @@ function buildMesaBelt(seed = 21) {
       wide: 1.0,
     });
     const a = rnd() * TAU;
-    const r = 150 + rnd() * 230;
-    const s = 26 + rnd() * 46;
+    const r = 215 + rnd() * 300;
+    const s = 34 + rnd() * 60;
     geo.scale(s, s * (0.5 + rnd() * 0.55), s * (0.7 + rnd() * 0.6));
     geo.rotateY(rnd() * TAU);
     geo.translate(Math.cos(a) * r, -3, Math.sin(a) * r);
@@ -6202,15 +6347,36 @@ const WORLD_LOCKED = Math.PI;   // rig azimuth that puts the camera due south
  */
 const LEAN_MAX = 26 * DEG;
 
+/** Clearance kept between the camera and any rock it would otherwise enter. */
+const CAM_PAD = 1.2;
+/** Preferred floor for the boom: below this the rig looks for a way round. */
+const CAM_MIN_DIST = 8.0;
+/** Absolute floor, used only when no bearing works at all. */
+const CAM_HARD_MIN = 3.6;
+/**
+ * How far the rig may step sideways around an obstacle it cannot see past.
+ *
+ * A ship hugging the far side of a twelve-unit butte cannot be seen from any
+ * distance directly behind it, and clearing the top would need the eye a
+ * hundred units up. Stepping around is the only remedy left. Bounded, because
+ * the input basis stays on rigYaw while this moves: a small mismatch is worth
+ * it to see your own ship, a large one is not.
+ */
+const CAM_AVOID_MAX = 78 * DEG;
+const CAM_AVOID_STEPS = [14, -14, 28, -28, 42, -42, 56, -56, 70, -70, 78, -78];
+
 /**
  * height/distance set the pitch — the whole point of the change. `look` is the
  * height of the look-at point: raising it tilts the rig up, which drops the ship
  * down the screen and puts sky above the horizon.
  */
 const RIGS = {
-  pov: { height: 8.0, distance: 16.0, fov: 70, look: 2.4, turns: true, fogNear: 105, fogFar: 330 },
-  chase: { height: 14.0, distance: 24.0, fov: 66, look: 2.0, turns: false, fogNear: 110, fogFar: 340 },
-  tactical: { height: 26.5, distance: 19.5, fov: 56, look: 0.6, turns: false, fogNear: 90, fogFar: 260 },
+  // Fog distances are tuned to the arena, which is now 66 across the radius:
+  // the far wall can be 140 units away, and haze that started at 105 turned it
+  // into a flat milky band with no rock left in it.
+  pov: { height: 8.0, distance: 16.0, fov: 70, look: 2.4, turns: true, fogNear: 155, fogFar: 470 },
+  chase: { height: 14.0, distance: 24.0, fov: 66, look: 2.0, turns: false, fogNear: 160, fogFar: 480 },
+  tactical: { height: 26.5, distance: 19.5, fov: 56, look: 0.6, turns: false, fogNear: 135, fogFar: 400 },
 };
 
 /**
@@ -6248,6 +6414,18 @@ class GameCamera {
     this.camera.position.set(0, 34, 26);
     this.camera.lookAt(0, 0, 0);
     this.shakeOffset = new THREE.Vector3();
+    // Set once from the game so the boom can avoid the scenery (see _solveBoom).
+    this.obstacles = null;
+    // Bearing offset currently in use to see round an obstacle, and the
+    // bearing it is heading for (held across frames — see follow).
+    this.avoidYaw = 0;
+    this._avoidTarget = 0;
+    this.arenaRadius = 0;
+    // Smoothed boom length. Kept separately from distanceScale because the two
+    // move on different timescales: pulling in has to be immediate or the
+    // camera clips through rock, while pushing back out has to be slow or it
+    // pops the moment you clear a corner.
+    this.boom = 0;
   }
 
   /** Switch rigs. Unknown names fall back to the over-the-shoulder default. */
@@ -6259,6 +6437,108 @@ class GameCamera {
     if (!rig.turns) this.rigYaw = WORLD_LOCKED;
     this.setAspect(this.camera.aspect);
     return this.rig;
+  }
+
+  /** Give the rig the collision world so the boom can avoid it. */
+  setWorld(world) {
+    this.obstacles = world ? world.obstacles : null;
+    this.arenaRadius = world ? world.radius : 0;
+  }
+
+  /**
+   * Boom length and eye height that together leave the ship visible.
+   *
+   * The arena is full of standing rock, and a chase rig that ignores it spends
+   * half a fight looking at the inside of a butte. Obstacles are already
+   * tracked as vertical cylinders for collision, so this is one quadratic per
+   * obstacle rather than a mesh raycast — cheap enough to run every frame.
+   *
+   * The camera sits at `target - fwd * t`, so substituting that into
+   * |point - centre| = r + pad gives t^2 - 2bt + c = 0, and the near root is
+   * the first t at which the camera would enter something.
+   *
+   * There are two ways out and the order matters. Winding the boom in is
+   * preferred because it keeps the framing. But a ship hugging the far side of
+   * a big butte cannot be seen from any distance that is still behind it, so
+   * below a floor the rig climbs instead and looks down over the top. Both are
+   * bounded, and the solve is iterated because each one changes what blocks.
+   */
+  _solveBoom(tx, tz, fwdX, fwdZ, want, lookY, eyeFor) {
+    let dist = want;
+    let eye = eyeFor(want);
+    if (!this.obstacles) return { dist, eye, blocked: false };
+    const maxEye = eyeFor(want) * 2.1;
+
+    let blocked = false;
+    for (let pass = 0; pass < 3; pass++) {
+      let shortest = dist;
+      let lift = eye;
+      blocked = false;
+      for (const ob of this.obstacles) {
+        const dx = tx - ob.x, dz = tz - ob.z;
+        const r = ob.r + CAM_PAD;
+        const c = dx * dx + dz * dz - r * r;
+        if (c <= 0) continue;                 // the ship is inside it already
+        const b = dx * fwdX + dz * fwdZ;
+        const disc = b * b - c;
+        if (disc <= 0) continue;              // the boom misses this one
+        const tEnter = b - Math.sqrt(disc);
+        if (tEnter <= 0 || tEnter >= dist) continue;
+        // The sight line climbs from the ship to the eye, so a rock only
+        // blocks if it is still taller than the line where the line passes
+        // over it. Testing the ground plan alone had the rig flinching away
+        // from every boulder it drove past.
+        const h = lookY + (eye - lookY) * (tEnter / dist);
+        if (ob.height !== undefined && ob.height < h) continue;
+        if (tEnter >= CAM_MIN_DIST) {
+          if (tEnter < shortest) shortest = tEnter;
+        } else if (ob.height !== undefined) {
+          // Too close to back away from: rise until the line clears the top.
+          // If that needs more height than the cap allows, the bearing is a
+          // write-off and the caller has to go round — saying so is the point
+          // of `blocked`. Reporting success here is what previously left the
+          // rig staring into a butte with a full-length boom.
+          const need = lookY + (ob.height + 1.4 - lookY) * (dist / Math.max(0.001, tEnter));
+          if (need > maxEye) blocked = true;
+          if (need > lift) lift = Math.min(need, maxEye);
+        }
+      }
+      const settled = shortest === dist && lift === eye;
+      dist = Math.max(CAM_MIN_DIST, shortest);
+      eye = Math.max(eyeFor(dist), lift);
+      if (settled) break;
+    }
+    // Nothing worked from this bearing. Wind in below the usual floor so the
+    // ship is at least on screen — a very close camera beats a view of rock.
+    if (blocked) {
+      let nearest = dist;
+      for (const ob of this.obstacles) {
+        const dx = tx - ob.x, dz = tz - ob.z;
+        const r = ob.r + CAM_PAD;
+        const c = dx * dx + dz * dz - r * r;
+        if (c <= 0) continue;
+        const b = dx * fwdX + dz * fwdZ;
+        const disc = b * b - c;
+        if (disc <= 0) continue;
+        const tEnter = b - Math.sqrt(disc);
+        if (tEnter > 0 && tEnter < nearest) nearest = tEnter;
+      }
+      dist = Math.max(CAM_HARD_MIN, nearest);
+      eye = eyeFor(dist);
+    }
+
+    // and keep the camera inside the canyon rather than buried in its wall
+    if (this.arenaRadius > 0) {
+      const maxR = this.arenaRadius + 3;
+      const c = tx * tx + tz * tz - maxR * maxR;
+      const b = tx * fwdX + tz * fwdZ;
+      const disc = b * b - c;
+      if (disc > 0) {
+        const tExit = b + Math.sqrt(disc);    // target is inside, so this root
+        if (tExit > 0 && tExit < dist) dist = Math.max(CAM_MIN_DIST, tExit);
+      }
+    }
+    return { dist, eye, blocked };
   }
 
   /** Unit vector the rig looks along, on the ground plane. */
@@ -6352,7 +6632,11 @@ class GameCamera {
       this.target.x += fx2 * w;
       this.target.z += fz2 * w;
     }
-    const k = 0.0009;                    // smoothing constant (fraction left after 1s)
+    // Fraction of the error still left after one second. Softer than it was:
+    // at 0.0009 the rig arrived in about a sixth of a second, which tracks the
+    // ship so tightly that the ship looks pinned to the screen and only the
+    // world appears to move.
+    const k = 0.0035;
     this.smoothTarget.x = damp(this.smoothTarget.x, this.target.x, k, dt);
     this.smoothTarget.y = damp(this.smoothTarget.y, this.target.y, k, dt);
     this.smoothTarget.z = damp(this.smoothTarget.z, this.target.z, k, dt);
@@ -6365,13 +6649,85 @@ class GameCamera {
     const ds = this.distanceScale;
     const shake = fx ? fx.shake(performance.now() * 0.001) : { x: 0, y: 0, roll: 0 };
     const fwdX = this.forwardX, fwdZ = this.forwardZ;
-    const dist = rig.distance * ds;
-    this.camera.position.set(
-      this.smoothTarget.x - fwdX * dist + shake.x,
-      rig.height * (1 + (ds - 1) * 0.55) + shake.y,
-      this.smoothTarget.z - fwdZ * dist,
-    );
-    this.offset.set(-fwdX * dist, this.camera.position.y, -fwdZ * dist);
+    const want = rig.distance * ds;
+    const fullEye = rig.height * (1 + (ds - 1) * 0.55);
+    // Eye height falls as the boom shortens, and the boom depends on the eye
+    // height (a lower line is blocked by more rock), so the two are solved
+    // together. Two passes is plenty — the second barely moves.
+    const eyeFor = (d) => fullEye * (0.72 + clamp01(d / Math.max(0.001, rig.distance)) * 0.28);
+    // Try straight back first; only look for a way round if that is hopeless.
+    let solved = this._solveBoom(this.smoothTarget.x, this.smoothTarget.z, fwdX, fwdZ, want, rig.look, eyeFor);
+    const straightOk = !solved.blocked && solved.dist >= want * 0.62;
+    let avoid = 0;
+    if (straightOk) {
+      // nothing in the way: unwind whatever detour we were on
+      this._avoidTarget = 0;
+    } else {
+      // Hysteresis. Re-running the search from scratch every frame makes the
+      // rig hunt between two equally good bearings and never arrive at either,
+      // so the detour we are already on gets to keep the job while it works.
+      const held = this._avoidTarget || 0;
+      let chosen = null;
+      if (held !== 0) {
+        const a = this.rigYaw + held;
+        const cur = this._solveBoom(this.smoothTarget.x, this.smoothTarget.z, Math.sin(a), Math.cos(a), want, rig.look, eyeFor);
+        if (!cur.blocked && cur.dist >= want * 0.55) chosen = { off: held, sol: cur };
+      }
+      if (!chosen) {
+        let best = { off: 0, sol: solved };
+        for (const deg of CAM_AVOID_STEPS) {
+          const a = this.rigYaw + deg * DEG;
+          const alt = this._solveBoom(this.smoothTarget.x, this.smoothTarget.z, Math.sin(a), Math.cos(a), want, rig.look, eyeFor);
+          // an unblocked bearing always beats a blocked one, however short
+          const better = (!alt.blocked && best.sol.blocked)
+            || (alt.blocked === best.sol.blocked && alt.dist > best.sol.dist + 1);
+          if (better) best = { off: deg * DEG, sol: alt };
+          if (!best.sol.blocked && best.sol.dist >= want * 0.9) break;
+        }
+        chosen = { off: best.off, sol: best.sol };
+      }
+      this._avoidTarget = chosen.off;
+      solved = chosen.sol;
+      avoid = chosen.off;
+    }
+    this.avoidYaw = damp(this.avoidYaw, clamp(avoid, -CAM_AVOID_MAX, CAM_AVOID_MAX), 0.004, dt);
+    const viewYaw = this.rigYaw + this.avoidYaw;
+    const vFwdX = Math.sin(viewYaw), vFwdZ = Math.cos(viewYaw);
+    const clear = solved.dist;
+    // Asymmetric: snap in hard so the camera never enters rock, ease back out
+    // so it does not pop the instant the ship clears a corner.
+    if (this.boom === 0) this.boom = clear;
+    this.boom = clear < this.boom
+      ? damp(this.boom, clear, 0.0002, dt)
+      : damp(this.boom, clear, 0.22, dt);
+    const dist = this.boom;
+    // The eye comes down a little with the boom so a shortened rig does not
+    // stare straight along the deck — but only a little. Dropping it far is
+    // what used to put the camera underneath the height it had just checked
+    // for clearance, and therefore inside the rock it had cleared.
+    if (this.eye === undefined) this.eye = solved.eye;
+    this.eye = damp(this.eye, solved.eye, 0.004, dt);
+    const eye = this.eye;
+    let cx = this.smoothTarget.x - vFwdX * dist + shake.x;
+    let cz = this.smoothTarget.z - vFwdZ * dist;
+    // Last resort. Solving the boom is the real mechanism, but it is damped and
+    // the ship can be shoved by an explosion faster than the boom retracts, so
+    // this guarantees the invariant the solve only approximates: the camera is
+    // never inside rock.
+    if (this.obstacles) {
+      for (const ob of this.obstacles) {
+        if (ob.height !== undefined && eye > ob.height) continue;
+        const dx = cx - ob.x, dz = cz - ob.z;
+        const d = Math.sqrt(dx * dx + dz * dz);
+        const r = ob.r + 0.6;
+        if (d >= r) continue;
+        if (d < 1e-4) { cx = ob.x + r; continue; }
+        cx = ob.x + (dx / d) * r;
+        cz = ob.z + (dz / d) * r;
+      }
+    }
+    this.camera.position.set(cx, eye + shake.y, cz);
+    this.offset.set(-vFwdX * dist, this.camera.position.y, -vFwdZ * dist);
     this._tmp.set(this.smoothTarget.x + shake.x * 0.4, rig.look, this.smoothTarget.z);
     this.camera.lookAt(this._tmp);
     if (shake.roll) this.camera.rotateZ(shake.roll);
@@ -6391,6 +6747,10 @@ class GameCamera {
   parkTarget(x, z) {
     this.target.set(x, 0, z);
     this.smoothTarget.set(x, 0, z);
+    this.boom = 0;
+    this.eye = undefined;
+    this.avoidYaw = 0;
+    this._avoidTarget = 0;
     this.distanceScale = 1;
     this.targetDistanceScale = 1;
   }
@@ -6399,6 +6759,10 @@ class GameCamera {
   snapTo(x, z, facing) {
     this.target.set(x, 0, z);
     this.smoothTarget.set(x, 0, z);
+    this.boom = 0;
+    this.eye = undefined;
+    this.avoidYaw = 0;
+    this._avoidTarget = 0;
     this.distanceScale = 1;
     if (this.rig.turns && facing !== undefined) {
       this.rigYaw = WORLD_LOCKED + clamp(wrapAngle(facing - WORLD_LOCKED), -LEAN_MAX, LEAN_MAX);
@@ -7231,7 +7595,17 @@ class ScreenFX {
  * a handful of draw calls no matter what the fight is doing.
  */
 
-const ARENA_RADIUS = 46;
+/**
+ * Play radius. Everything else derives from it — the canyon, the ground mesh,
+ * spawn rings, projectile bounds, boss patrol limits — so this is the one
+ * number that resizes the arena.
+ */
+const ARENA_RADIUS = 66;
+
+/** Where the sun sits relative to whatever the shadow frustum is centred on. */
+const SUN_OFFSET = new THREE.Vector3(-58, 34, -24);
+/** Half-width of the shadow ortho box, in world units. */
+const SHADOW_SPAN = 46;
 
 class World {
   constructor(scene, rng) {
@@ -7255,16 +7629,18 @@ class World {
     // A real light, not a direction uniform. This is what buys cast shadows,
     // and cast shadows are most of what "golden hour" means.
     this.sun = new THREE.DirectionalLight(0xffd2a1, 1.95);
-    this.sun.position.set(-58, 30, -24);
+    this.sun.position.copy(SUN_OFFSET);
     this.sun.target.position.set(0, 0, 0);
     this.sun.castShadow = true;
     const sc = this.sun.shadow;
     sc.mapSize.set(2048, 2048);
-    // One cascade sized to the arena: the whole playfield is 46 across, so a
-    // 64-unit ortho box covers it without the resolution loss of a big frustum.
-    sc.camera.left = -64; sc.camera.right = 64;
-    sc.camera.top = 64; sc.camera.bottom = -64;
-    sc.camera.near = 1; sc.camera.far = 190;
+    // The frustum follows the player (see update) rather than covering the
+    // whole arena: a box wide enough for a 66-unit playfield would spend most
+    // of its resolution on ground nobody is looking at. This one is smaller
+    // than the old fixed box *and* sharper, on a much larger arena.
+    sc.camera.left = -SHADOW_SPAN; sc.camera.right = SHADOW_SPAN;
+    sc.camera.top = SHADOW_SPAN; sc.camera.bottom = -SHADOW_SPAN;
+    sc.camera.near = 1; sc.camera.far = 230;
     sc.bias = -0.0008;
     sc.normalBias = 0.06;
     scene.add(this.sun);
@@ -7282,7 +7658,7 @@ class World {
 
     // Distance haze. The materials are three's standard now, so fog has to be
     // on the scene — `fog: true` on a material does nothing without it.
-    this.fog = new THREE.Fog(0x8a6a4c, 105, 330);
+    this.fog = new THREE.Fog(0x7d5f43, 155, 470);
     scene.fog = this.fog;
 
     // ---------- ground ----------
@@ -7292,7 +7668,7 @@ class World {
     // that the floor shader then details.
     this.floorMat = createFloorMaterial();
     this.floorMat.uniforms.uRadius.value = this.radius;
-    this.floor = new THREE.Mesh(buildGround(this.radius, 150), this.floorMat);
+    this.floor = new THREE.Mesh(buildGround(this.radius, 215), this.floorMat);
     this.floor.receiveShadow = true;
     scene.add(this.floor);
 
@@ -7323,15 +7699,24 @@ class World {
     // ---------- cover: spires, dead trees, cactus ----------
     this.pillarMat = createNovaMaterial({ rim: 0.28, spec: 0.05, rimColor: 0xffb877, bump: 0.22, bumpScale: 0.5 });
     this.pillars = [];
+    // Angle, radius, kind. Two rings of cover plus outliers: the inner ring is
+    // what you fight around, the outer one breaks up the run to the wall. A
+    // butte is a wide flat-topped mass, a spire is a narrow one — mixing the
+    // silhouettes is most of what stops an arena reading as a field of cones.
     const layout = [
-      [0.30, 24, 'spire'], [1.35, 30, 'spire'], [2.35, 22, 'tree'], [3.35, 31, 'spire'],
-      [4.35, 25, 'spire'], [5.35, 30, 'tree'], [0.85, 38, 'spire'], [2.90, 39, 'cactus'],
-      [4.95, 38, 'spire'], [1.90, 15, 'cactus'], [3.90, 17, 'tree'], [5.90, 36, 'cactus'],
+      [0.30, 22, 'spire'], [1.35, 26, 'butte'], [2.35, 20, 'tree'], [3.35, 27, 'spire'],
+      [4.35, 23, 'butte'], [5.35, 26, 'tree'], [1.90, 14, 'cactus'], [3.90, 16, 'tree'],
+      [0.85, 40, 'spire'], [1.75, 44, 'butte'], [2.60, 41, 'cactus'], [3.45, 45, 'spire'],
+      [4.30, 40, 'butte'], [5.15, 44, 'tree'], [6.00, 42, 'spire'], [0.10, 46, 'cactus'],
+      [0.55, 57, 'butte'], [1.55, 59, 'spire'], [2.20, 55, 'cactus'], [3.10, 58, 'butte'],
+      [3.80, 56, 'tree'], [4.70, 59, 'spire'], [5.60, 55, 'butte'], [6.15, 57, 'cactus'],
+      [2.85, 33, 'tree'], [5.90, 34, 'cactus'],
     ];
     const kinds = {
       spire: [this._spire(0), this._spire(1), this._spire(2)],
-      tree: [buildBranchTree(0), buildBranchTree(1)],
-      cactus: [buildSaguaro(0), buildSaguaro(1)],
+      butte: [this._butte(0), this._butte(1), this._butte(2)],
+      tree: [buildBranchTree(0), buildBranchTree(1), buildBranchTree(2)],
+      cactus: [buildSaguaro(0), buildSaguaro(1), buildSaguaro(2)],
     };
     this._pillarGeos = [];
     for (const k in kinds) for (const g of kinds[k]) this._pillarGeos.push(g.geometry);
@@ -7349,7 +7734,9 @@ class World {
       scene.add(m);
       this.pillars.push(m);
       // only rock blocks; you ride straight through a cactus or a dead tree
-      if (kind === 'spire') this.obstacles.push({ x, z, r: spec.radius * s * 1.5, height: spec.height * s });
+      if (kind === 'spire' || kind === 'butte') {
+        this.obstacles.push({ x, z, r: spec.radius * s * 1.5, height: spec.height * s });
+      }
     });
     // the tower's legs are solid
     this.obstacles.push({ x: 0, z: 0, r: 4.4, height: 7, core: true });
@@ -7371,7 +7758,7 @@ class World {
     scene.add(this.mist);
 
     // ---------- ambient motes ----------
-    this.motes = this._buildMotes(420);
+    this.motes = this._buildMotes(620);
     scene.add(this.motes);
   }
 
@@ -7403,15 +7790,42 @@ class World {
   }
 
   /**
+   * A butte: wide, flat-topped, heavily bedded. The counterpart to a spire —
+   * an arena of nothing but tall narrow rocks reads as a field of cones, and
+   * the contrast in silhouette is what makes either one land.
+   */
+  _butte(seed) {
+    const h = 9.0 + (seed % 3) * 3.2;
+    const cap = seat(buildRock(seed * 197 + 61, {
+      rough: 0.28, tall: 1.0, wide: 1.0, beds: 3.2, ledge: 0.40, cuts: 9, flatTop: 0.72,
+    }).scale(5.6, h / 0.84, 4.9), 0.5);
+    const parts = [cap];
+    // a talus skirt, so the mass grows out of the ground instead of landing on it
+    for (let i = 0; i < 5; i++) {
+      const a = (i / 5) * TAU + seed * 1.7;
+      const sc = 1.1 + (i % 3) * 0.5;
+      const g = seat(buildRock(seed * 83 + i * 29, { detail: 2, rough: 0.5, tall: 0.55 })
+        .scale(sc * 2.0, sc * 0.9, sc * 2.0)
+        .rotateY(a * 1.3), 0.4 * sc);
+      g.translate(Math.cos(a) * (4.6 + i * 0.4), 0, Math.sin(a) * (4.2 + i * 0.35));
+      parts.push(g);
+    }
+    return { geometry: mergeGeometries(parts), radius: 3.9, height: h };
+  }
+
+  /**
    * Loose stone and dry brush across the flats. Instanced, so the whole layer
    * costs two draw calls no matter how many objects are in it.
    */
   _buildScatter() {
     const rng = new RNG(90210);
     const out = [];
+    // Counts scale with area, not radius — a 1.4x wider arena is a 2x bigger
+    // floor, and the same scatter spread over it reads as emptier than before.
     const specs = [
-      { geo: buildPebble(3), count: 150, mat: this.pillarMat, lo: 0.16, hi: 0.72, edge: true },
-      { geo: buildScrub(11), count: 110, mat: createNovaMaterial({ rim: 0.2, spec: 0.04, rimColor: 0xffd0a0 }), lo: 0.7, hi: 1.5, edge: false },
+      { geo: buildPebble(3), count: 330, mat: this.pillarMat, lo: 0.16, hi: 0.9, edge: true },
+      { geo: buildPebble(19), count: 90, mat: this.pillarMat, lo: 0.9, hi: 2.2, edge: true },
+      { geo: buildScrub(11), count: 260, mat: createNovaMaterial({ rim: 0.2, spec: 0.04, rimColor: 0xffd0a0 }), lo: 0.7, hi: 1.7, edge: false },
     ];
     this._scatterGeos = [];
     this._scatterMats = [];
@@ -7425,7 +7839,7 @@ class World {
       for (let i = 0; i < spec.count; i++) {
         const a = rng.next() * TAU;
         // biased outward: the middle of the arena has to stay clear to fight in
-        const r = lerp(6, this.radius + 0.5, Math.pow(rng.next(), 0.55));
+        const r = lerp(5, this.radius + 0.5, Math.pow(rng.next(), 0.55));
         const s = rng.range(spec.lo, spec.hi);
         // A tumbled pebble has no "down" face, so it is sunk rather than seated:
         // half-buried always reads as resting, at any orientation.
@@ -7602,6 +8016,19 @@ class World {
 
   update(dt, playerPos, coreGlow = 0) {
     this.time += dt;
+
+    // Walk the shadow frustum along with the player. Snapped to whole shadow
+    // texels first: an unsnapped moving frustum makes every shadow edge crawl
+    // and shimmer as the map slides under it, which is far more distracting
+    // than the softness a bigger fixed box would have cost.
+    if (playerPos && this.sun.castShadow) {
+      const texel = (SHADOW_SPAN * 2) / this.sun.shadow.mapSize.x;
+      const sx = Math.round(playerPos.x / texel) * texel;
+      const sz = Math.round(playerPos.z / texel) * texel;
+      this.sun.position.set(sx + SUN_OFFSET.x, SUN_OFFSET.y, sz + SUN_OFFSET.z);
+      this.sun.target.position.set(sx, 0, sz);
+      this.sun.target.updateMatrixWorld();
+    }
     const u = this.floorMat.uniforms;
     this.threat = lerp(this.threat, this.targetThreat, clamp01(dt * 1.2));
     u.uThreat.value = this.threat;
@@ -9205,6 +9632,8 @@ class Projectiles {
  */
 
 const HOVER_Y = 1.05;
+/** Radians per second the hull may swing its nose. ~570 deg/s: quick, but readable. */
+const TURN_RATE = 10;
 
 class Player {
   constructor(scene, game) {
@@ -9398,8 +9827,16 @@ class Player {
       const d = lengthXZ(dx, dz);
       if (d > 0.4) this.aimDir.set(dx / d, 0, dz / d);
     }
+    // A vehicle swings its nose at a bounded rate. Snapping to the aim
+    // instantly is what makes a twin-stick read as a cursor with a sprite
+    // attached rather than as something you are driving — and from a low
+    // camera the nose is the only heading cue there is. Damping still handles
+    // the last few degrees, so it settles rather than stopping dead.
     const targetYaw = Math.atan2(this.aimDir.x, this.aimDir.z);
-    this.yaw = dampAngle(this.yaw, targetYaw, 0.000004, dt);
+    const eased = dampAngle(this.yaw, targetYaw, 0.000004, dt);
+    const step = wrapAngle(eased - this.yaw);
+    const maxStep = TURN_RATE * dt;
+    this.yaw = wrapAngle(this.yaw + clamp(step, -maxStep, maxStep));
 
     // ---------- movement ----------
     const mx = input.move.x, mz = input.move.z;
@@ -11344,7 +11781,9 @@ class WaveDirector {
     let best = null, bestScore = -Infinity;
     for (let i = 0; i < 8; i++) {
       const a = rng.next() * TAU;
-      const r = lerp(18, g.world.radius - 6, rng.next());
+      // Scaled to the arena, not a fixed 18: on a bigger floor a constant
+      // inner radius crowds every spawn into the middle.
+      const r = lerp(g.world.radius * 0.30, g.world.radius - 6, rng.next());
       const x = Math.cos(a) * r, z = Math.sin(a) * r;
       const dp = Math.hypot(x - p.x, z - p.z);
       if (dp < 13) continue;
@@ -11479,8 +11918,8 @@ class WaveDirector {
 const $ = (id) => document.getElementById(id);
 
 const CONTROLS = [
-  ['W A S D', 'Thrusters (also arrow keys / left stick)'],
-  ['MOUSE', 'Aim — the lance tracks your cursor'],
+  ['W A S D', 'Steer — the ship points where it is going (arrows / left stick)'],
+  ['MOUSE', 'Aim somewhere other than straight ahead'],
   ['LMB / RT', 'Fire repeater'],
   ['RMB / E', 'Nova pulse — clears bullets, knocks back'],
   ['SPACE', 'Phase dash — invulnerable while dashing'],
@@ -11765,13 +12204,23 @@ class UI {
       { value: 'auto', label: 'AUTO' }, { value: 'low', label: 'LOW' },
       { value: 'medium', label: 'MED' }, { value: 'high', label: 'HIGH' },
     ]);
+    choice('CONTROLS', 'controlScheme', [
+      { value: 'drive', label: 'DRIVE' }, { value: 'freeaim', label: 'FREE AIM' },
+    ]);
+    const ctrlHint = document.createElement('p');
+    ctrlHint.style.cssText = 'margin:-4px 0 6px;color:#8ea6c4;font-size:12px;line-height:1.45';
+    ctrlHint.textContent = {
+      drive: 'The left stick steers: the ship points where it is going. The right stick only shoots — push it to aim somewhere else, ignore it to fire straight ahead.',
+      freeaim: 'Classic twin-stick: the right stick sets which way the ship faces, the left one strafes independently.',
+    }[s.controlScheme] || '';
+    host.appendChild(ctrlHint);
     choice('CAMERA', 'cameraStyle', [
       { value: 'pov', label: 'POV' }, { value: 'chase', label: 'CHASE' }, { value: 'tactical', label: 'TOP' },
     ]);
     const camHint = document.createElement('p');
     camHint.style.cssText = 'margin:-4px 0 6px;color:#8ea6c4;font-size:12px;line-height:1.45';
     camHint.textContent = {
-      pov: 'Over-the-shoulder. The camera swings behind the ship as you turn — stick and touch aiming only; a mouse cursor keeps the view world-locked.',
+      pov: 'Over-the-shoulder. The camera leans toward the way you are heading — stick and touch only; a mouse cursor keeps the view world-locked.',
       chase: 'Low and wide, but world-locked: north is always up the screen.',
       tactical: 'High board view. Flattest, but you can see the whole deck.',
     }[s.cameraStyle] || '';
@@ -12304,6 +12753,8 @@ class Game {
 
     await step(0.18, 'painting the void', () => {
       this.world = new World(this.scene, this.rng);
+      // the rig needs the standing rock so its boom can avoid it
+      this.camera.setWorld(this.world);
     });
 
     await step(0.38, 'forging hulls', () => {
@@ -12415,6 +12866,8 @@ class Game {
     if (this.screen) this.screen.shakeScale = reduce ? Math.min(s.shake, 0.25) : s.shake;
     document.body.classList.toggle('no-scanlines', !s.scanlines);
     document.body.classList.toggle('no-flash', !s.flashes);
+    // Read once here rather than through `save` on the hot path.
+    this.driveScheme = s.controlScheme !== 'freeaim';
     if (this.camera) {
       this.camera.enableLead = s.cameraRotate;
       const rig = this.camera.setStyle(s.cameraStyle);
@@ -13047,23 +13500,36 @@ class Game {
     const p = this.player;
 
     // ---- aim ----
-    if (this.input.aim.mode === 'stick') {
-      const d = this.input.aim;
+    // Four sources, in priority order. The third is what the drive scheme adds:
+    // with no stick on the aim, steering *is* aiming, so the ship's nose stays
+    // pointed along its heading and the reticle sits ahead of it. That is the
+    // navigation cue a low camera otherwise has no way to give you.
+    const ai = this.input.aim;
+    const mv = this.input.move;
+    const moveLen = Math.hypot(mv.x, mv.z);
+    const driving = this.driveScheme !== false;
+    const project = (dx, dz, assist = true) => {
       // Stick and touch aiming get a modest magnetic assist toward whatever is
       // closest to the aim ray. Mouse aiming gets none — it does not need it,
-      // and stealing precision from a mouse player feels awful.
-      const a = this._aimAssist(p.position, d.dirX, d.dirZ);
+      // and stealing precision from a mouse player feels awful. Neither does
+      // an idle ship: assist there would swing the nose around to track
+      // enemies with the player's hands off the controls.
+      const a = assist ? this._aimAssist(p.position, dx, dz) : { x: dx, z: dz };
       this._aimWorld.set(p.position.x + a.x * 22, 1.05, p.position.z + a.z * 22);
       const s = this.camera.worldToScreen(this._aimWorld.x, this._aimWorld.y, this._aimWorld.z, this.width, this.height);
       this.aimScreen.x = s.x; this.aimScreen.y = s.y;
-    } else if (this.input.aim.active) {
-      this.camera.screenToGround(this.input.aim.screenX, this.input.aim.screenY, this.width, this.height, this._aimWorld);
-      this.aimScreen.x = this.input.aim.screenX;
-      this.aimScreen.y = this.input.aim.screenY;
+    };
+    if (ai.mode === 'stick' && (ai.held || !driving)) {
+      project(ai.dirX, ai.dirZ);
+    } else if (ai.mode === 'pointer' && ai.active) {
+      this.camera.screenToGround(ai.screenX, ai.screenY, this.width, this.height, this._aimWorld);
+      this.aimScreen.x = ai.screenX;
+      this.aimScreen.y = ai.screenY;
+    } else if (driving && moveLen > 0.05) {
+      project(mv.x / moveLen, mv.z / moveLen);
     } else {
-      this._aimWorld.set(p.position.x, 1.05, p.position.z - 20);
-      const s = this.camera.worldToScreen(this._aimWorld.x, this._aimWorld.y, this._aimWorld.z, this.width, this.height);
-      this.aimScreen.x = s.x; this.aimScreen.y = s.y;
+      // standing still with nothing aiming: hold the facing we already have
+      project(p.aimDir.x, p.aimDir.z, false);
     }
 
     this.shadows.begin();
@@ -13099,8 +13565,11 @@ class Game {
       this.camera.parkTarget(p.position.x, p.position.z);
       this.director.applyTo(this.camera.camera);
     } else {
-      // Only a stick may steer the rig — see GameCamera.follow.
-      const turnTo = this.input.aim.mode === 'stick' ? p.yaw : null;
+      // A mouse cursor may not steer the rig — its ground point rotates with
+      // the camera, so the rig would chase its own tail. Everything else (an
+      // aim stick, or the drive scheme's steering) may.
+      const pointerAiming = this.input.aim.mode === 'pointer' && this.input.aim.active;
+      const turnTo = pointerAiming ? null : p.yaw;
       this.camera.follow(p, this._aimWorld, dtReal, this.screen, this.boss.active ? 0.7 : 0,
         this.boss.active ? this.boss : null, turnTo);
     }

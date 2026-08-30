@@ -25,7 +25,11 @@ export class Input {
     this.move = { x: 0, z: 0 };
     // rawX/rawZ are the stick's own axes; dirX/dirZ are those rotated into
     // world space each frame against the camera basis (see sample).
-    this.aim = { mode: 'pointer', screenX: 0, screenY: 0, dirX: 0, dirZ: -1, rawX: 0, rawZ: -1, active: false };
+    // `active` latches once anything has aimed; `held` is true only while an
+    // aim stick is actually being pushed this frame. The drive scheme needs the
+    // second one — it hands the nose back to the throttle the moment you let
+    // go, and a latched flag can never say that.
+    this.aim = { mode: 'pointer', screenX: 0, screenY: 0, dirX: 0, dirZ: -1, rawX: 0, rawZ: -1, active: false, held: false };
     this.fire = false;
     this.firePulse = false;      // "pulse" as in secondary weapon, held
     this.dashEdge = false;
@@ -196,6 +200,7 @@ export class Input {
   sample(dt, rigYaw = Math.PI) {
     if (this.suppress > 0) this.suppress -= dt;
     const locked = !this.enabled || this.suppress > 0;
+    this.aim.held = false;
 
     let mx = 0, mz = 0;
     if (!locked) {
@@ -235,6 +240,7 @@ export class Input {
         this.aim.mode = 'stick';
         this.aim.rawX = rx / rr; this.aim.rawZ = ry / rr;
         this.aim.active = true;
+        this.aim.held = true;
         fire = true;                                   // twin-stick: aiming shoots
       }
       const btn = (i) => !!(pad.buttons[i] && pad.buttons[i].pressed);
@@ -269,6 +275,7 @@ export class Input {
           this.aim.mode = 'stick';
           this.aim.rawX = sa.x / l; this.aim.rawZ = sa.z / l;
           this.aim.active = true;
+          this.aim.held = true;
           fire = true;
         }
       }
@@ -291,6 +298,7 @@ export class Input {
       if (al > 0.001) {
         this.aim.mode = 'stick';
         this.aim.active = true;
+        this.aim.held = true;
         this.aim.rawX = ov.aimStick.x / al;
         this.aim.rawZ = ov.aimStick.z / al;
       }
@@ -324,6 +332,7 @@ export class Input {
       if (o.aim) {
         this.aim.mode = 'stick';
         this.aim.active = true;
+        this.aim.held = true;
         this.aim.dirX = o.aim.x;
         this.aim.dirZ = o.aim.z;
       }

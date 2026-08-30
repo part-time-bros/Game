@@ -224,7 +224,9 @@ export class WaveDirector {
     let best = null, bestScore = -Infinity;
     for (let i = 0; i < 8; i++) {
       const a = rng.next() * TAU;
-      const r = lerp(18, g.world.radius - 6, rng.next());
+      // Scaled to the arena, not a fixed 18: on a bigger floor a constant
+      // inner radius crowds every spawn into the middle.
+      const r = lerp(g.world.radius * 0.30, g.world.radius - 6, rng.next());
       const x = Math.cos(a) * r, z = Math.sin(a) * r;
       const dp = Math.hypot(x - p.x, z - p.z);
       if (dp < 13) continue;

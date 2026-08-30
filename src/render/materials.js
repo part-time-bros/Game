@@ -488,7 +488,7 @@ export function createFloorMaterial() {
           vec3 fr2 = cross(normal, fpx);
           float fdt = dot(fpx, fr1);
           vec3 fgrad = sign(fdt) * (dFdx(fh) * fr1 + dFdy(fh) * fr2);
-          normal = normalize(abs(fdt) * normal - 0.11 * fdetail * fgrad);
+          normal = normalize(abs(fdt) * normal - 0.075 * fdetail * fgrad);
         }`)
       .replace('#include <emissivemap_fragment>', `
         totalEmissiveRadiance += uAccent * uCoreGlow * 0.04 * exp(-frad * 0.09);

@@ -91,6 +91,8 @@ export class Game {
 
     await step(0.18, 'painting the void', () => {
       this.world = new World(this.scene, this.rng);
+      // the rig needs the standing rock so its boom can avoid it
+      this.camera.setWorld(this.world);
     });
 
     await step(0.38, 'forging hulls', () => {
@@ -202,6 +204,8 @@ export class Game {
     if (this.screen) this.screen.shakeScale = reduce ? Math.min(s.shake, 0.25) : s.shake;
     document.body.classList.toggle('no-scanlines', !s.scanlines);
     document.body.classList.toggle('no-flash', !s.flashes);
+    // Read once here rather than through `save` on the hot path.
+    this.driveScheme = s.controlScheme !== 'freeaim';
     if (this.camera) {
       this.camera.enableLead = s.cameraRotate;
       const rig = this.camera.setStyle(s.cameraStyle);
@@ -834,23 +838,36 @@ export class Game {
     const p = this.player;
 
     // ---- aim ----
-    if (this.input.aim.mode === 'stick') {
-      const d = this.input.aim;
+    // Four sources, in priority order. The third is what the drive scheme adds:
+    // with no stick on the aim, steering *is* aiming, so the ship's nose stays
+    // pointed along its heading and the reticle sits ahead of it. That is the
+    // navigation cue a low camera otherwise has no way to give you.
+    const ai = this.input.aim;
+    const mv = this.input.move;
+    const moveLen = Math.hypot(mv.x, mv.z);
+    const driving = this.driveScheme !== false;
+    const project = (dx, dz, assist = true) => {
       // Stick and touch aiming get a modest magnetic assist toward whatever is
       // closest to the aim ray. Mouse aiming gets none — it does not need it,
-      // and stealing precision from a mouse player feels awful.
-      const a = this._aimAssist(p.position, d.dirX, d.dirZ);
+      // and stealing precision from a mouse player feels awful. Neither does
+      // an idle ship: assist there would swing the nose around to track
+      // enemies with the player's hands off the controls.
+      const a = assist ? this._aimAssist(p.position, dx, dz) : { x: dx, z: dz };
       this._aimWorld.set(p.position.x + a.x * 22, 1.05, p.position.z + a.z * 22);
       const s = this.camera.worldToScreen(this._aimWorld.x, this._aimWorld.y, this._aimWorld.z, this.width, this.height);
       this.aimScreen.x = s.x; this.aimScreen.y = s.y;
-    } else if (this.input.aim.active) {
-      this.camera.screenToGround(this.input.aim.screenX, this.input.aim.screenY, this.width, this.height, this._aimWorld);
-      this.aimScreen.x = this.input.aim.screenX;
-      this.aimScreen.y = this.input.aim.screenY;
+    };
+    if (ai.mode === 'stick' && (ai.held || !driving)) {
+      project(ai.dirX, ai.dirZ);
+    } else if (ai.mode === 'pointer' && ai.active) {
+      this.camera.screenToGround(ai.screenX, ai.screenY, this.width, this.height, this._aimWorld);
+      this.aimScreen.x = ai.screenX;
+      this.aimScreen.y = ai.screenY;
+    } else if (driving && moveLen > 0.05) {
+      project(mv.x / moveLen, mv.z / moveLen);
     } else {
-      this._aimWorld.set(p.position.x, 1.05, p.position.z - 20);
-      const s = this.camera.worldToScreen(this._aimWorld.x, this._aimWorld.y, this._aimWorld.z, this.width, this.height);
-      this.aimScreen.x = s.x; this.aimScreen.y = s.y;
+      // standing still with nothing aiming: hold the facing we already have
+      project(p.aimDir.x, p.aimDir.z, false);
     }
 
     this.shadows.begin();
@@ -886,8 +903,11 @@ export class Game {
       this.camera.parkTarget(p.position.x, p.position.z);
       this.director.applyTo(this.camera.camera);
     } else {
-      // Only a stick may steer the rig — see GameCamera.follow.
-      const turnTo = this.input.aim.mode === 'stick' ? p.yaw : null;
+      // A mouse cursor may not steer the rig — its ground point rotates with
+      // the camera, so the rig would chase its own tail. Everything else (an
+      // aim stick, or the drive scheme's steering) may.
+      const pointerAiming = this.input.aim.mode === 'pointer' && this.input.aim.active;
+      const turnTo = pointerAiming ? null : p.yaw;
       this.camera.follow(p, this._aimWorld, dtReal, this.screen, this.boss.active ? 0.7 : 0,
         this.boss.active ? this.boss : null, turnTo);
     }

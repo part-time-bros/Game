@@ -18,6 +18,10 @@ const DEFAULT_SETTINGS = {
   showPerf: false,
   cameraRotate: true,   // camera eases toward aim direction
   cameraStyle: 'pov',   // pov | chase | tactical (see render/camera.js)
+  // drive   — the left stick steers: the ship points where it is going, and the
+  //           right stick only shoots (push it to aim, ignore it to fire ahead)
+  // freeaim — classic twin-stick: the right stick sets facing, the left strafes
+  controlScheme: 'drive',
 };
 
 const DEFAULT_RECORD = {
